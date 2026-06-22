@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <header>
+        <span class="mark" aria-hidden="true">A</span>
+        <span class="wordmark">Accessibility<span class="accent"> Scanner</span></span>
+    </header>
+
+    <div id="intro" class="pad">
+        <p class="lede">Audit this page against WCAG 2.2. Issues get outlined right on the page.</p>
+        <button id="scan" class="btn-primary">Scan this page</button>
+        <p class="fineprint">Runs locally in your browser. No login, no email.</p>
+    </div>
+
+    <div id="results" class="hidden">
+        <div class="pad">
+            <div id="verdict" class="verdict"></div>
+            <div id="scorecard" class="scorecard"></div>
+        </div>
+        <ul id="findings" class="findings"></ul>
+        <div class="pad actions">
+            <button id="rescan" class="btn-ghost">Re-scan</button>
+            <button id="clear" class="btn-ghost">Clear outlines</button>
+        </div>
+        <p id="coverage" class="coverage">Automated checks catch the machine-testable subset of WCAG. Items marked “review” still need a human. We don’t fake compliance.</p>
+    </div>
+
+    <div id="error" class="hidden pad">
+        <p class="err"></p>
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+</html>

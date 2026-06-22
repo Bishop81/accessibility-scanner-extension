@@ -1,0 +1,185 @@
+// Runs in the popup. Injects axe-core into the active tab, runs the WCAG ruleset,
+// outlines offending elements on the page, and renders a summary here.
+
+const $ = (id) => document.getElementById(id);
+const IMPACTS = ['critical', 'serious', 'moderate', 'minor'];
+
+async function activeTab() {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tab;
+}
+
+async function runScan() {
+    const tab = await activeTab();
+    if (!tab || /^(chrome|edge|about|chrome-extension):/.test(tab.url || '')) {
+        return showError("This page can't be scanned (browser/internal page). Open a normal website and try again.");
+    }
+
+    $('scan').disabled = true;
+    $('scan').textContent = 'Scanning…';
+
+    try {
+        // 1) inject axe-core, 2) run it + draw overlays, return the summary.
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['axe.min.js'] });
+        const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageScan });
+        renderResults(result);
+    } catch (e) {
+        showError('Could not scan this page. ' + (e?.message || ''));
+    } finally {
+        $('scan').disabled = false;
+        $('scan').textContent = 'Scan this page';
+    }
+}
+
+async function clearOutlines() {
+    const tab = await activeTab();
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageClear });
+}
+
+function renderResults(r) {
+    if (!r) return showError('No result returned.');
+    $('intro').classList.add('hidden');
+    $('error').classList.add('hidden');
+    $('results').classList.remove('hidden');
+
+    const total = IMPACTS.reduce((s, k) => s + (r.counts[k] || 0), 0);
+    $('verdict').innerHTML = total === 0
+        ? `No automated violations — <span style="color:var(--ink-soft)">some checks still need a human.</span>`
+        : `<span class="num" style="color:var(--critical)">${total}</span> automated ${total === 1 ? 'issue' : 'issues'} · ${r.affected} elements outlined`;
+
+    const tiles = [...IMPACTS.map((k) => [k, k, r.counts[k] || 0]), ['review', 'review', r.manualReview]];
+    $('scorecard').innerHTML = tiles.map(([cls, label, n]) =>
+        `<div class="tile t-${cls} ${n === 0 ? 'zero' : ''}"><div class="n">${n}</div><div class="l">${label}</div></div>`
+    ).join('');
+
+    $('findings').innerHTML = r.list.length === 0
+        ? `<li style="color:var(--ink-soft)">Nothing flagged by automated checks.</li>`
+        : r.list.map((v) => `
+            <li>
+                <span class="dot d-${v.impact || 'minor'}"></span>
+                <span class="finding-main">
+                    <span class="finding-rule">${escapeHtml(v.id)}</span>
+                    <span class="finding-help">${escapeHtml(v.help)}</span>
+                </span>
+                <span class="finding-count">${v.count}×</span>
+            </li>`).join('');
+}
+
+function showError(msg) {
+    $('intro').classList.add('hidden');
+    $('results').classList.add('hidden');
+    $('error').classList.remove('hidden');
+    $('error').querySelector('.err').textContent = msg;
+}
+
+function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+$('scan').addEventListener('click', runScan);
+$('rescan').addEventListener('click', runScan);
+$('clear').addEventListener('click', clearOutlines);
+
+// ─── Injected into the page (must be self-contained) ───
+
+async function pageScan() {
+    document.querySelectorAll('.a11ysc-ov, .a11ysc-bg').forEach((e) => e.remove());
+
+    const colors = { critical: '#b42318', serious: '#b54708', moderate: '#175cd3', minor: '#4a5567' };
+    const results = await window.axe.run(document, {
+        runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-practice'] },
+        resultTypes: ['violations', 'incomplete', 'passes'],
+    });
+
+    // Resolve color-contrast axe punted on over a CSS gradient (worst-case at a stop
+    // → real pass/fail). Mirrors scripts/scan.mjs — keep in sync. Images/translucent
+    // gradients stay incomplete. Wrapped so it can never break the scan.
+    try {
+        const ci = results.incomplete.findIndex((x) => x.id === 'color-contrast');
+        if (ci !== -1) {
+            const entry = results.incomplete[ci];
+            const parseRgb = (s) => { const m = (s || '').match(/rgba?\(([^)]+)\)/i); if (!m) return null; const p = m[1].split(',').map((x) => parseFloat(x)); return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 }; };
+            const lin = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+            const lum = (c) => 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b);
+            const contrast = (a, b) => { const hi = Math.max(lum(a), lum(b)), lo = Math.min(lum(a), lum(b)); return (hi + 0.05) / (lo + 0.05); };
+            const keep = [], failed = [];
+            for (const node of entry.nodes) {
+                try {
+                    const sel = Array.isArray(node.target) ? node.target[node.target.length - 1] : node.target;
+                    const el = document.querySelector(sel);
+                    if (!el) { keep.push(node); continue; }
+                    const cs = getComputedStyle(el);
+                    const fg = parseRgb(cs.color);
+                    if (!fg) { keep.push(node); continue; }
+                    const fontPx = parseFloat(cs.fontSize) || 16, weight = parseInt(cs.fontWeight, 10) || 400;
+                    const required = (fontPx >= 24 || (fontPx >= 18.66 && weight >= 700)) ? 3 : 4.5;
+                    let bg = null;
+                    for (let hop = el; hop; hop = hop.parentElement) { const bi = getComputedStyle(hop).backgroundImage; if (bi && bi.indexOf('gradient(') !== -1) { bg = bi; break; } }
+                    if (!bg || bg.indexOf('url(') !== -1) { keep.push(node); continue; }
+                    const stops = (bg.match(/rgba?\([^)]+\)/gi) || []).map(parseRgb).filter(Boolean);
+                    if (!stops.length || stops.some((s) => s.a < 1)) { keep.push(node); continue; }
+                    let worst = Infinity; for (const s of stops) worst = Math.min(worst, contrast(fg, s));
+                    if (worst < required) { node.failureSummary = `Background gradient: lowest-contrast point is ${worst.toFixed(2)}:1, below ${required}:1.`; failed.push(node); }
+                } catch (e) { keep.push(node); }
+            }
+            if (keep.length) { entry.nodes = keep; } else { results.incomplete.splice(ci, 1); }
+            if (failed.length) {
+                let v = results.violations.find((x) => x.id === 'color-contrast');
+                if (!v) { v = { id: entry.id, impact: entry.impact || 'serious', description: entry.description, help: entry.help, helpUrl: entry.helpUrl, tags: entry.tags, nodes: [] }; results.violations.push(v); }
+                for (const n of failed) v.nodes.push(n);
+            }
+        }
+    } catch (e) { /* never break the scan */ }
+
+    const counts = { critical: 0, serious: 0, moderate: 0, minor: 0 };
+    const list = [];
+    let n = 0;
+
+    for (const v of results.violations) {
+        counts[v.impact] = (counts[v.impact] || 0) + 1;
+        list.push({
+            id: v.id, impact: v.impact, help: v.help, count: v.nodes.length,
+        });
+        const color = colors[v.impact] || colors.minor;
+        for (const node of v.nodes) {
+            let el;
+            try { el = document.querySelector(node.target[0]); } catch { el = null; }
+            if (!el) continue;
+            const r = el.getBoundingClientRect();
+            if (r.width === 0 && r.height === 0) continue;
+            n++;
+            const x = r.left + window.scrollX, y = r.top + window.scrollY;
+
+            const box = document.createElement('div');
+            box.className = 'a11ysc-ov';
+            Object.assign(box.style, {
+                position: 'absolute', left: x + 'px', top: y + 'px',
+                width: r.width + 'px', height: r.height + 'px',
+                border: '2px solid ' + color, borderRadius: '2px',
+                boxShadow: '0 0 0 1px rgba(255,255,255,.55)', zIndex: 2147483646, pointerEvents: 'none',
+            });
+            document.body.appendChild(box);
+
+            const badge = document.createElement('div');
+            badge.className = 'a11ysc-bg';
+            badge.textContent = n;
+            badge.title = v.id;
+            Object.assign(badge.style, {
+                position: 'absolute', left: x + 'px', top: Math.max(0, y - 18) + 'px',
+                background: color, color: '#fff', font: '600 11px/1.4 ui-monospace,monospace',
+                padding: '0 5px', borderRadius: '3px', zIndex: 2147483647, pointerEvents: 'none',
+            });
+            document.body.appendChild(badge);
+        }
+    }
+
+    return {
+        counts, affected: n, manualReview: results.incomplete.length,
+        passes: results.passes.length, list,
+        engine: results.testEngine && results.testEngine.version,
+    };
+}
+
+function pageClear() {
+    document.querySelectorAll('.a11ysc-ov, .a11ysc-bg').forEach((e) => e.remove());
+}
