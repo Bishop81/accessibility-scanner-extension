@@ -209,25 +209,6 @@ async function pageScan() {
 
     const colors = { critical: '#b42318', serious: '#b54708', moderate: '#175cd3', minor: '#4a5567' };
 
-    // Hover any numbered badge to see the specific failure for that element.
-    const tip = document.createElement('div');
-    tip.className = 'a11ysc-tip';
-    Object.assign(tip.style, {
-        position: 'fixed', zIndex: '2147483647', pointerEvents: 'none', display: 'none',
-        maxWidth: '340px', background: '#1b1916', color: '#fff',
-        font: '500 12px/1.45 ui-sans-serif,system-ui,sans-serif', padding: '8px 10px',
-        borderRadius: '6px', boxShadow: '0 8px 28px rgba(0,0,0,.32)', whiteSpace: 'pre-wrap',
-    });
-    document.body.appendChild(tip);
-    const showTip = (e, text) => {
-        tip.textContent = text; tip.style.display = 'block';
-        const pad = 14, r = tip.getBoundingClientRect();
-        let x = e.clientX + pad, y = e.clientY + pad;
-        if (x + r.width > innerWidth) x = e.clientX - r.width - pad;
-        if (y + r.height > innerHeight) y = e.clientY - r.height - pad;
-        tip.style.left = Math.max(4, x) + 'px'; tip.style.top = Math.max(4, y) + 'px';
-    };
-    const hideTip = () => { tip.style.display = 'none'; };
     const results = await window.axe.run(document, {
         runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-practice'] },
         resultTypes: ['violations', 'incomplete', 'passes'],
@@ -311,14 +292,14 @@ async function pageScan() {
         const badge = document.createElement('div');
         badge.className = 'a11ysc-bg';
         badge.textContent = num;
+        // Native title tooltip: survives the injected-script context (a custom JS
+        // tooltip's listeners do not), and shows the full detail on hover.
+        badge.title = detail;
         Object.assign(badge.style, {
             position: 'absolute', left: x + 'px', top: Math.max(0, y - 18) + 'px',
             background: color, color: '#fff', font: '600 11px/1.4 ui-monospace,monospace',
             padding: '0 5px', borderRadius: '3px', zIndex: 2147483647, pointerEvents: 'auto', cursor: 'help',
         });
-        badge.addEventListener('mouseenter', (e) => showTip(e, detail));
-        badge.addEventListener('mousemove', (e) => showTip(e, detail));
-        badge.addEventListener('mouseleave', hideTip);
         document.body.appendChild(badge);
         return true;
     };
