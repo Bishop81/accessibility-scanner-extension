@@ -3,7 +3,8 @@
 
 const $ = (id) => document.getElementById(id);
 const IMPACTS = ['critical', 'serious', 'moderate', 'minor'];
-let lastScan = null;  // { url, result } — source for the exports
+let lastScan = null;  // { v, url, result } — source for the exports
+const SCAN_VERSION = 2;  // bump when the result shape changes, so stale stored scans aren't restored
 
 async function activeTab() {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -24,7 +25,7 @@ async function runScan() {
         await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['axe.min.js'] });
         const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageScan });
         renderResults(result);
-        lastScan = { url: tab.url, result };
+        lastScan = { v: SCAN_VERSION, url: tab.url, result };
         // Persist so reopening the popup shows the same scan instead of a blank slate.
         await chrome.storage.session.set({ ['scan_' + tab.id]: lastScan });
     } catch (e) {
@@ -189,7 +190,10 @@ async function restore() {
         if (!tab) return;
         const key = 'scan_' + tab.id;
         const saved = (await chrome.storage.session.get(key))[key];
-        if (!saved || saved.url !== tab.url) return;
+        if (!saved || saved.url !== tab.url || saved.v !== SCAN_VERSION) {
+            if (saved) await chrome.storage.session.remove(key);
+            return;
+        }
         const [{ result: outlineCount }] = await chrome.scripting.executeScript({
             target: { tabId: tab.id },
             func: () => document.querySelectorAll('.a11ysc-ov').length,
