@@ -20,11 +20,16 @@
         <div class="pad">
             <div id="verdict" class="verdict"></div>
             <div id="scorecard" class="scorecard"></div>
+            <p class="hint">Hover a numbered badge on the page to see that element’s exact issue.</p>
         </div>
         <ul id="findings" class="findings"></ul>
         <div class="pad actions">
             <button id="rescan" class="btn-ghost">Re-scan</button>
             <button id="clear" class="btn-ghost">Clear outlines</button>
+        </div>
+        <div class="pad export">
+            <button id="copy" class="btn-ghost">Copy report</button>
+            <button id="json" class="btn-ghost">Export JSON</button>
         </div>
         <p id="coverage" class="coverage">Automated checks catch the machine-testable subset of WCAG. Items marked “review” still need a human. We don’t fake compliance.</p>
     </div>

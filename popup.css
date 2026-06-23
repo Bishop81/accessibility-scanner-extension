@@ -102,5 +102,7 @@ header {
 .finding-count { font: 600 12px/1 ui-monospace, monospace; color: var(--ink-soft); flex: none; margin-top: 2px; }
 
 .actions { display: flex; gap: 8px; }
-.coverage { margin: 0; padding: 0 16px 14px; font-size: 11px; color: var(--ink-soft); }
+.export { display: flex; gap: 8px; padding-top: 4px; }
+.hint { margin: 10px 0 0; font: 11.5px/1.4 ui-monospace, monospace; color: var(--ink-soft); }
+.coverage { margin: 0; padding: 8px 16px 14px; font-size: 11px; color: var(--ink-soft); }
 .err { color: var(--critical); }
