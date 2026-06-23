@@ -23,6 +23,8 @@ async function runScan() {
         await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['axe.min.js'] });
         const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageScan });
         renderResults(result);
+        // Persist so reopening the popup shows the same scan instead of a blank slate.
+        await chrome.storage.session.set({ ['scan_' + tab.id]: { url: tab.url, result } });
     } catch (e) {
         showError('Could not scan this page. ' + (e?.message || ''));
     } finally {
@@ -34,6 +36,10 @@ async function runScan() {
 async function clearOutlines() {
     const tab = await activeTab();
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageClear });
+    await chrome.storage.session.remove('scan_' + tab.id);
+    $('results').classList.add('hidden');
+    $('error').classList.add('hidden');
+    $('intro').classList.remove('hidden');
 }
 
 function renderResults(r) {
@@ -44,7 +50,7 @@ function renderResults(r) {
 
     const total = IMPACTS.reduce((s, k) => s + (r.counts[k] || 0), 0);
     $('verdict').innerHTML = total === 0
-        ? `No automated violations — <span style="color:var(--ink-soft)">some checks still need a human.</span>`
+        ? `No automated violations. <span style="color:var(--ink-soft)">Some checks still need a human.</span>`
         : `<span class="num" style="color:var(--critical)">${total}</span> automated ${total === 1 ? 'issue' : 'issues'} · ${r.affected} elements outlined`;
 
     const tiles = [...IMPACTS.map((k) => [k, k, r.counts[k] || 0]), ['review', 'review', r.manualReview]];
@@ -56,7 +62,7 @@ function renderResults(r) {
         ? `<li style="color:var(--ink-soft)">Nothing flagged by automated checks.</li>`
         : r.list.map((v) => `
             <li>
-                <span class="dot d-${v.impact || 'minor'}"></span>
+                <span class="fnum d-${v.impact || 'minor'}" title="Matches the badge numbered ${v.num} on the page">${v.num}</span>
                 <span class="finding-main">
                     <span class="finding-rule">${escapeHtml(v.id)}</span>
                     <span class="finding-help">${escapeHtml(v.help)}</span>
@@ -79,6 +85,26 @@ function escapeHtml(s) {
 $('scan').addEventListener('click', runScan);
 $('rescan').addEventListener('click', runScan);
 $('clear').addEventListener('click', clearOutlines);
+
+// On reopen, restore the last scan for this tab — but only if its outlines are
+// still on the page (a reload wipes them, so we fall back to a fresh start).
+async function restore() {
+    try {
+        const tab = await activeTab();
+        if (!tab) return;
+        const key = 'scan_' + tab.id;
+        const saved = (await chrome.storage.session.get(key))[key];
+        if (!saved || saved.url !== tab.url) return;
+        const [{ result: outlineCount }] = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => document.querySelectorAll('.a11ysc-ov').length,
+        });
+        if (!outlineCount) { await chrome.storage.session.remove(key); return; }
+        renderResults(saved.result);
+    } catch (e) { /* leave the intro showing */ }
+}
+
+restore();
 
 // ─── Injected into the page (must be self-contained) ───
 
@@ -133,12 +159,14 @@ async function pageScan() {
 
     const counts = { critical: 0, serious: 0, moderate: 0, minor: 0 };
     const list = [];
-    let n = 0;
+    let n = 0;       // total elements outlined (for the summary line)
+    let fnum = 0;    // finding number: shown on every badge for that rule + in the list
 
     for (const v of results.violations) {
+        fnum++;
         counts[v.impact] = (counts[v.impact] || 0) + 1;
         list.push({
-            id: v.id, impact: v.impact, help: v.help, count: v.nodes.length,
+            num: fnum, id: v.id, impact: v.impact, help: v.help, count: v.nodes.length,
         });
         const color = colors[v.impact] || colors.minor;
         for (const node of v.nodes) {
@@ -162,8 +190,8 @@ async function pageScan() {
 
             const badge = document.createElement('div');
             badge.className = 'a11ysc-bg';
-            badge.textContent = n;
-            badge.title = v.id;
+            badge.textContent = fnum;
+            badge.title = '#' + fnum + ' ' + v.id;
             Object.assign(badge.style, {
                 position: 'absolute', left: x + 'px', top: Math.max(0, y - 18) + 'px',
                 background: color, color: '#fff', font: '600 11px/1.4 ui-monospace,monospace',
