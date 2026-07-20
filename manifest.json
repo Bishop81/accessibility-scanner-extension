@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Accessibility Scanner",
-  "version": "0.1.0",
-  "description": "Honest, instant WCAG accessibility audit of any page. See exactly what's broken, outlined right on the page. No login, no email.",
+  "name": "Accessibility Scanner — WCAG, ADA & Color Contrast Checker",
+  "version": "0.1.1",
+  "description": "Test any page for WCAG issues: color contrast, alt text, form labels, headings. Outlined where they are. No login, no email.",
   "action": {
     "default_popup": "popup.html",
     "default_title": "Accessibility Scanner",
