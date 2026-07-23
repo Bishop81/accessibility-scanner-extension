@@ -211,6 +211,90 @@ restore();
 async function pageScan() {
     document.querySelectorAll('.a11ysc-ov, .a11ysc-bg, .a11ysc-tip').forEach((e) => e.remove());
 
+// executeScript serialises this whole function, so settlePage must be nested here
+// rather than imported — it cannot reach popup.js scope. Left un-indented on
+// purpose so it stays byte-for-byte identical to the other three surfaces.
+// ─── Page settle (runs in page context) ───
+// Scrolls the document so lazy-loaded content actually renders, then returns to
+// the top and waits for images, fonts and entrance transitions to finish.
+//
+// Without this we scan whatever happened to be above the fold. That understates
+// a page badly: on a Squarespace site we measured 3 contrast violations before
+// this and 12 after, identical colours, the other 9 simply had not rendered.
+// It also manufactures noise, since off-canvas elements come back from axe as
+// "outsideViewport" with no reading at all.
+//
+// Kept byte-identical across scripts/scan.mjs, the CLI, the MCP server and the
+// extension. Four surfaces that see different amounts of a page report different
+// results for it, which is the bug this fixes. If you edit one, edit all four.
+async function settlePage(options) {
+  const { stepRatio = 0.75, pauseMs = 150, maxMs = 12000, settleMs = 1200 } = options || {};
+  const started = Date.now();
+  const doc = document.documentElement;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const fullHeight = () => Math.max(doc.scrollHeight, document.body ? document.body.scrollHeight : 0);
+  // maxMs bounds this whole function, not just the scroll walk, so the caller
+  // can size its process timeout against one number.
+  const left = () => maxMs - (Date.now() - started);
+  const waitUpTo = (promise, ms) => Promise.race([promise, sleep(Math.max(0, ms))]);
+
+  // CSS smooth scrolling makes scrollTo asynchronous, so steps would overlap and
+  // observers would fire unpredictably. Forced off for the walk, restored after.
+  const priorBehavior = doc.style.scrollBehavior;
+  doc.style.scrollBehavior = 'auto';
+
+  try {
+    const step = Math.max(200, Math.round(window.innerHeight * stepRatio));
+    // Reserve room for the tail phases so a very long page can't consume the
+    // entire budget scrolling and leave nothing to render in.
+    const walkBudget = maxMs - settleMs - 1500;
+
+    // scrollHeight grows as content loads, so re-read it on every pass rather
+    // than computing the stop point once up front.
+    for (let y = 0, guard = 0; guard < 400; guard++) {
+      if (Date.now() - started > walkBudget || y >= fullHeight()) {
+        break;
+      }
+      window.scrollTo(0, y);
+      await sleep(pauseMs);
+      y += step;
+    }
+
+    // Footers usually carry the last lazy batch, and they are where contact
+    // details and legal links live, so they are worth an explicit stop.
+    window.scrollTo(0, fullHeight());
+    await sleep(pauseMs * 2);
+    window.scrollTo(0, 0);
+    await sleep(pauseMs);
+
+    // Images that only just entered the DOM still have to decode before their
+    // dimensions and colours can be measured.
+    const pending = Array.from(document.images).filter((img) => !img.complete);
+    if (pending.length && left() > settleMs) {
+      await waitUpTo(
+        Promise.all(pending.map((img) => new Promise((resolve) => {
+          img.addEventListener('load', resolve, { once: true });
+          img.addEventListener('error', resolve, { once: true });
+        }))),
+        Math.min(3000, left() - settleMs),
+      );
+    }
+
+    if (document.fonts && document.fonts.ready && left() > settleMs) {
+      await waitUpTo(document.fonts.ready, Math.min(2000, left() - settleMs));
+    }
+
+    // Entrance transitions must finish, or text gets measured mid-fade at an
+    // opacity that is not what a user ever sees.
+    await sleep(settleMs);
+  } finally {
+    doc.style.scrollBehavior = priorBehavior;
+  }
+}
+
+    await settlePage({ maxMs: 12000 });
+
+
     const colors = { critical: '#b42318', serious: '#b54708', moderate: '#175cd3', minor: '#4a5567' };
 
     const results = await window.axe.run(document, {

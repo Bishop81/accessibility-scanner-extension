@@ -16,6 +16,8 @@ multi-page audits, saved history, and scheduled monitoring that catches regressi
 - **Honest results** — issues grouped by impact, with a "how to fix" link per rule, and items
   that still need a human flagged as "needs review" rather than hidden. It never claims you are
   "compliant."
+- **Checks lazy-loaded content** — the page is scrolled before testing, so sections that had not
+  rendered yet get checked instead of silently skipped. Most scanners only test what was on screen.
 - **Resolves gradient contrast** — where axe leaves color-contrast as "needs review" because the
   text sits on a CSS gradient, this measures the worst-case contrast and gives a real pass/fail.
 - **Export for an AI agent or developer** — copy a Markdown report or download JSON, each with the

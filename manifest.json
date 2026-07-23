@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Accessibility Scanner — WCAG, ADA & Color Contrast Checker",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Test any page for WCAG issues: color contrast, alt text, form labels, headings. Outlined where they are. No login, no email.",
   "action": {
     "default_popup": "popup.html",
