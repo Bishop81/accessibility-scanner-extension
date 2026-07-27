@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.1
+
+### Contrast over photos and gradients now gets a real answer
+
+Text sitting on a background photo used to come back as "needs review", because the colour
+underneath it cannot be read from CSS. The scan now decodes the image and samples the pixels
+behind the text, so you get an actual pass or fail with a number. Dark overlays on hero images
+are handled too, the way the browser paints them rather than being written off as unknowable.
+
+Gradients were already resolved, but that had quietly stopped working on sites built with
+current CSS. Colours are now read through the browser itself instead of being pattern-matched,
+so gradients written with newer colour syntax are measured properly again.
+
+Anything still genuinely unknowable is left as "needs review" rather than guessed. An image
+served from another domain cannot be sampled unless that server allows it, and a gradient
+painted by a separate overlay element rather than an ancestor of the text is not picked up.
+
 ## 0.2.0
 
 ### Scans now load the whole page before testing
