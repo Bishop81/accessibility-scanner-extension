@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.2
+
+### Contrast is now checked in the focused state too
+
+A button can read perfectly well normally and become almost invisible the moment you tab
+to it, because the focus style changes the colours. Automated checkers miss this: they
+measure the page as it sits, so the button passes while being unusable for the people who
+navigate by keyboard and depend on seeing where they are.
+
+The scan now focuses each control it can reach by tabbing, reads the colours the browser
+actually renders in that state, and reports anything that passes at rest and fails once
+focused, with both ratios so you can see the drop.
+
+Focus styling applied by JavaScript rather than CSS is not covered, and a focus state over
+a background photo is left alone rather than guessed at.
+
 ## 0.2.1
 
 ### Contrast over photos and gradients now gets a real answer
