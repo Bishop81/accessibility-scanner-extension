@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0
+
+### See the keyboard path through a page
+
+"Show tab order" numbers every tab stop on the page, in the order a keyboard user will
+actually reach them. Follow 1, 2, 3 and you can see immediately when the order jumps
+somewhere unexpected, which is usually where keyboard users get lost.
+
+It shows rather than judges. Whether an order makes sense is a decision about your
+content, so the extension puts the sequence in front of you and leaves the call to you.
+Two things it does flag, because both are unambiguous: a positive tabindex, which
+reorders the whole document and lands that element first, and an element that can be
+tabbed to but is not visible anywhere on screen, so a keyboard user's focus disappears.
+
+Focusability is decided by the browser, not guessed from markup: each candidate is
+actually focused and checked. Your scroll position and whatever you had focused are put
+back afterwards.
+
 ## 0.2.2
 
 ### Contrast is now checked in the focused state too

@@ -40,6 +40,10 @@ async function clearOutlines() {
     const tab = await activeTab();
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageClear });
     await chrome.storage.session.remove('scan_' + tab.id);
+    // pageClear removes the tab-order overlay too, so the toggle must not claim it is showing.
+    tabOrderShown = false;
+    ['taborder', 'taborder2'].forEach((id) => { if ($(id)) $(id).textContent = 'Show tab order'; });
+    if ($('tabsummary')) $('tabsummary').classList.add('hidden');
     $('results').classList.add('hidden');
     $('error').classList.add('hidden');
     $('intro').classList.remove('hidden');
@@ -88,9 +92,55 @@ function escapeHtml(s) {
     return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// Tab order is a toggle, not a scan: it needs no results and no network, and it is
+// useful on a page you have not scanned. Kept separate from the violation overlays
+// so turning one off does not wipe the other.
+let tabOrderShown = false;
+
+async function toggleTabOrder() {
+    const buttons = ['taborder', 'taborder2'].map((id) => $(id)).filter(Boolean);
+    const summary = $('tabsummary');
+    try {
+        const tab = await activeTab();
+        if (!tab) return;
+
+        if (tabOrderShown) {
+            await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageFocusClear });
+            tabOrderShown = false;
+            buttons.forEach((b) => { b.textContent = 'Show tab order'; });
+            if (summary) summary.classList.add('hidden');
+            return;
+        }
+
+        const [{ result }] = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: pageFocusOrder,
+        });
+        tabOrderShown = true;
+        buttons.forEach((b) => { b.textContent = 'Hide tab order'; });
+
+        if (summary && result) {
+            const notes = [];
+            if (result.positiveTabindex) notes.push(result.positiveTabindex + ' with a positive tabindex');
+            if (result.invisible) notes.push(result.invisible + ' tabbable but not visible');
+            // Says what it found, then says who decides. Whether an order makes sense is
+            // a human judgement (WCAG 2.4.3), and the extension must not pretend otherwise.
+            summary.textContent = result.stops + ' tab ' + (result.stops === 1 ? 'stop' : 'stops')
+                + (notes.length ? ' \u00b7 ' + notes.join(', ') : '')
+                + '. Follow the numbers to check the order makes sense.';
+            summary.classList.remove('hidden');
+        }
+    } catch (e) {
+        showError('Could not read this page. Chrome blocks extensions on its own pages and the Web Store.');
+        buttons.forEach((b) => { b.textContent = 'Show tab order'; });
+        tabOrderShown = false;
+    }
+}
+
 $('scan').addEventListener('click', runScan);
 $('rescan').addEventListener('click', runScan);
 $('clear').addEventListener('click', clearOutlines);
+['taborder', 'taborder2'].forEach((id) => $(id) && $(id).addEventListener('click', toggleTabOrder));
 $('copy').addEventListener('click', copyReport);
 $('json').addEventListener('click', exportJson);
 
@@ -1091,5 +1141,156 @@ async function checkFocusContrast(results) {
 }
 
 function pageClear() {
-    document.querySelectorAll('.a11ysc-ov, .a11ysc-bg, .a11ysc-tip').forEach((e) => e.remove());
+    document.querySelectorAll('.a11ysc-ov, .a11ysc-bg, .a11ysc-tip, .a11ysc-fo, .a11ysc-fob').forEach((e) => e.remove());
+}
+
+// ─── Focus-order visualiser (injected into the page; must be self-contained) ───
+//
+// Numbers every tab stop in order, so you can SEE the keyboard path through a page.
+//
+// It deliberately shows rather than judges. WCAG 2.4.3 Focus Order is a manual
+// criterion: whether an order "makes sense" is a human decision about content, and
+// our own Section 508 checklist says so. A tool announcing "focus order is wrong"
+// would be inventing a verdict it cannot support. Numbered badges let a person see
+// a bad order in one glance and decide for themselves.
+//
+// Only two things are flagged automatically, both objectively detectable and
+// neither a matter of judgement:
+//   positive tabindex  an authoring hack that reorders the whole document
+//   invisible stop     tabbable but not visible, so a keyboard user lands nowhere
+// Anything softer is left unflagged on purpose. The CSSOM version of the
+// focus-contrast check taught this the hard way: it predicted rendered state and
+// reported failures on 6 of 14 real sites that had none.
+//
+// FOCUSABILITY IS DETERMINED BY THE BROWSER, not by the selector. Each candidate is
+// actually focused and checked against document.activeElement, for the same reason
+// the focus-contrast check does it: a stylesheet or an attribute list cannot tell
+// you what the browser will really do.
+async function pageFocusOrder() {
+    document.querySelectorAll('.a11ysc-fo, .a11ysc-fob').forEach((e) => e.remove());
+
+    const CANDIDATES = [
+        'a[href]', 'area[href]', 'button', 'input', 'select', 'textarea', 'summary',
+        'iframe', 'object', 'embed', 'audio[controls]', 'video[controls]',
+        '[contenteditable]', '[tabindex]',
+    ].join(',');
+
+    const previouslyFocused = document.activeElement;
+    const scrollX = window.scrollX, scrollY = window.scrollY;
+
+    const stops = [];
+    let positiveTabindex = 0, invisible = 0;
+
+    try {
+        const candidates = [...document.querySelectorAll(CANDIDATES)];
+
+        for (const el of candidates) {
+            if (el.disabled || el.closest('[inert]')) continue;
+
+            const cs = getComputedStyle(el);
+            // display:none and visibility:hidden remove an element from the tab order
+            // entirely, so they are not "invisible stops" — they are not stops at all.
+            if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+
+            const ti = el.getAttribute('tabindex');
+            const tabindex = ti === null ? null : parseInt(ti, 10);
+            if (tabindex !== null && !Number.isNaN(tabindex) && tabindex < 0) continue;   // removed from the order
+
+            // Ask the browser rather than guessing.
+            let focusable = false;
+            try {
+                el.focus({ preventScroll: true });
+                focusable = document.activeElement === el;
+            } catch (e) { focusable = false; }
+            if (!focusable) continue;
+
+            const r = el.getBoundingClientRect();
+            const hidden = (r.width === 0 && r.height === 0)
+                || r.bottom < 0 || r.right < 0
+                || r.top > document.documentElement.scrollHeight
+                || cs.opacity === '0';
+
+            stops.push({ el, tabindex, rect: r, hidden });
+        }
+
+        // The documented order: positive tabindex first, ascending, then everything
+        // else in document order. Stable within equal values, which is what the spec
+        // requires and what array order already gives us.
+        const positive = stops.filter((s) => s.tabindex !== null && s.tabindex > 0)
+            .sort((a, b) => a.tabindex - b.tabindex);
+        const natural = stops.filter((s) => !(s.tabindex !== null && s.tabindex > 0));
+        const ordered = [...positive, ...natural];
+
+        ordered.forEach((stop, i) => {
+            const num = i + 1;
+            const flags = [];
+            if (stop.tabindex !== null && stop.tabindex > 0) { flags.push('positive tabindex (' + stop.tabindex + ')'); positiveTabindex++; }
+            if (stop.hidden) { flags.push('tabbable but not visible'); invisible++; }
+
+            const flagged = flags.length > 0;
+            const color = flagged ? '#b54708' : '#0d5c54';
+
+            // Re-measure: focusing earlier elements can have scrolled the page.
+            const r = stop.el.getBoundingClientRect();
+            const x = r.left + window.scrollX, y = r.top + window.scrollY;
+
+            if (r.width > 0 || r.height > 0) {
+                const box = document.createElement('div');
+                box.className = 'a11ysc-fo';
+                Object.assign(box.style, {
+                    position: 'absolute', left: x + 'px', top: y + 'px',
+                    width: r.width + 'px', height: r.height + 'px',
+                    border: '2px ' + (flagged ? 'dashed' : 'solid') + ' ' + color, borderRadius: '2px',
+                    boxShadow: '0 0 0 1px rgba(255,255,255,.55)', zIndex: 2147483646, pointerEvents: 'none',
+                });
+                document.body.appendChild(box);
+            }
+
+            const badge = document.createElement('div');
+            badge.className = 'a11ysc-fob';
+            badge.textContent = num;
+            badge.title = 'Tab stop ' + num + ' of ' + ordered.length
+                + '\n<' + stop.el.tagName.toLowerCase() + '>'
+                + (stop.el.id ? ' #' + stop.el.id : '')
+                + (flagged ? '\n\n' + flags.join('\n') : '')
+                + (stop.hidden ? '\n\nA keyboard user tabs here and sees no focus indicator anywhere on screen.' : '');
+            Object.assign(badge.style, {
+                position: 'absolute',
+                // Hidden stops have no useful geometry, so stack their badges down the
+                // left edge instead of drawing them somewhere off-canvas.
+                left: (stop.hidden ? window.scrollX + 4 : x) + 'px',
+                top: (stop.hidden ? window.scrollY + 4 + (invisible - 1) * 20 : Math.max(0, y - 18)) + 'px',
+                background: color, color: '#fff', font: '600 11px/1.4 ui-monospace,monospace',
+                padding: '0 5px', borderRadius: '3px', zIndex: 2147483647, pointerEvents: 'auto', cursor: 'help',
+            });
+            document.body.appendChild(badge);
+        });
+
+        return { stops: ordered.length, positiveTabindex, invisible };
+    } finally {
+        // Leave the page as we found it. Focusing elements moves focus and can scroll.
+        //
+        // body and documentElement are excluded deliberately. They have a focus()
+        // method but are not focusable, so calling it is a silent no-op that leaves
+        // focus parked on the LAST tab stop we visited. Verified: on a page where
+        // nothing was focused to begin with, this left document.activeElement on a
+        // link, which moves a keyboard user's position out from under them.
+        try {
+            const restorable = previouslyFocused
+                && previouslyFocused !== document.body
+                && previouslyFocused !== document.documentElement
+                && typeof previouslyFocused.focus === 'function';
+
+            if (restorable) {
+                previouslyFocused.focus({ preventScroll: true });
+            } else if (document.activeElement && typeof document.activeElement.blur === 'function') {
+                document.activeElement.blur();
+            }
+        } catch (e) { /* not worth failing the visualisation over */ }
+        window.scrollTo(scrollX, scrollY);
+    }
+}
+
+function pageFocusClear() {
+    document.querySelectorAll('.a11ysc-fo, .a11ysc-fob').forEach((e) => e.remove());
 }
