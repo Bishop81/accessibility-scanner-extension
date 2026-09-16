@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.1
+
+### Contrast over a gradient is measured across the whole gradient
+
+Text on a gradient used to be checked only at the gradient's colour stops, on the
+assumption that the worst point had to be one of them. It does not. Browsers blend the
+colour values as they are stored, and the mix can come out darker than either end, so
+dark text could pass at both stops and fail in between. Black text on a red to green
+gradient measures 5.25:1 and 9.26:1 at the two stops and 3.49:1 about a third of the way
+across, which is a failure the scan used to call a pass.
+
+Gradients are now sampled along their whole length, blended the way the browser paints
+them. Light text was never affected, because the lightest point of a blend is always at a
+stop.
+
+The same correction applies to the focus-state check, so a control whose focused label
+fails partway across a gradient is now reported.
+
+Where a gradient cannot be measured honestly, the result stays "needs review" rather than
+passing: gradients blended in a hue-based space, and any colour the browser cannot read
+back. The old version quietly ignored colours it could not parse and judged from what was
+left.
+
 ## 0.3.0
 
 ### See the keyboard path through a page
