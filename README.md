@@ -25,7 +25,8 @@ multi-page audits, saved history, and scheduled monitoring that catches regressi
 
 ## Install
 
-- **Chrome Web Store:** listing pending review. (Link will go here once published.)
+- **Chrome Web Store:** **published** — https://chromewebstore.google.com/detail/eioinmceaddhlffcdaalmajjepanabki
+  (v0.3.1 live; status verified via the Web Store API, not the listing page — those are JS-rendered.)
 - **Load unpacked (for development):**
   1. Open `chrome://extensions`
   2. Enable **Developer mode** (top right)
