@@ -96,3 +96,31 @@ opacity no visitor ever sees.
 
 A scan now takes a few seconds longer, and the page visibly scrolls while it works. That is
 the scan doing its job. It is time-bounded, so it always finishes.
+
+## Unreleased — housekeeping for the next version
+
+### Add an MPL carve-out to LICENSE
+
+`LICENSE` declares MIT with no exception, which read strictly appears to cover the bundled
+`axe.min.js` as well. That file is axe-core 4.12.1 and is **MPL-2.0**, not MIT.
+
+Nothing is actually mis-licensed today. MPL-2.0 §3.3 permits distributing a Larger Work under
+terms of your choice provided the covered files keep their own licence, and `axe.min.js` ships
+unmodified with its own banner intact ("Copyright (c) 2015 - 2026 Deque Systems, Inc. Your use of
+this Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0"), which
+satisfies the notice requirement. MIT remains the correct declaration for our own code, and is what
+is declared on the Chrome, Edge and Firefox listings.
+
+The fix is three lines appended to `LICENSE`, to be folded into the next release rather than
+rebuilt mid-submission:
+
+    This package bundles axe-core (https://github.com/dequelabs/axe-core), which is licensed
+    under the Mozilla Public License 2.0, not the MIT License above. See the notice at the top
+    of axe.min.js. A copy of the MPL is available at https://mozilla.org/MPL/2.0/.
+
+### Harden the one unescaped interpolation in popup.js
+
+`renderItem` interpolates `v.impact` into a class attribute without passing it through
+`escapeHtml()`. It is safe in practice — axe only ever emits critical/serious/moderate/minor — but
+a whitelist check would make the answer to AMO's "unsafe assignment to innerHTML" warning airtight
+rather than merely correct. Every other page-derived value is already escaped.
