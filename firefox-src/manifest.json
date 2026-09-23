@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Accessibility Scanner — WCAG & Contrast",
+  "version": "0.3.1",
+  "description": "Test any page for WCAG issues: color contrast, alt text, form labels, headings. Outlined where they are. No login, no email.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Accessibility Scanner",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "accessibility-scanner@accessibilityscanner.app",
+      "strict_min_version": "115.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  }
+}
