@@ -89,3 +89,37 @@ minimum to 140 to silence the warning would drop Firefox 115–139 for no functi
 removing the key instead brings back `MISSING_DATA_COLLECTION_PERMISSIONS`. At a 115 floor those two
 warnings cannot both be satisfied; keeping the key is the better half of the trade. 115 is the real
 floor, set by `storage.session`.
+
+## ✅ 2026-09-23 — BOTH SUBMITTED. Identifiers and tooling.
+
+### Edge Add-ons
+    Store ID    0RDCKD1HTJ9N
+    CRX ID      pffipcdehejmlkeiilppkolajdfjgfob
+    Product ID  884f998c-b6e5-4193-97c5-27d747ff11c1
+    URL         available once published
+
+### Firefox AMO
+    Add-on ID   accessibility-scanner-webext@accessibilityscanner.app
+    Slug        accessibility-scanner-wcag       (AMO caps slugs at 30 chars; the auto-generated
+                                                  "accessibility-scanner-wcag-contrast" was 35 and rejected)
+    URL         https://addons.mozilla.org/en-US/firefox/addon/accessibility-scanner-wcag/
+    Status      nominated (awaiting review) as of 2026-09-23
+
+### Tooling — `publish-edge.py` and `publish-firefox.py`
+
+Adapted from `domainintel.app/extension/`, which already had working versions. Verified against
+the live APIs: Edge credentials accepted for our product, AMO returns our add-on.
+
+    python3 publish-firefox.py --status          # read-only: slug, name, status, version
+    python3 publish-edge.py --check              # read-only: verifies credentials
+    python3 publish-edge.py --upload <zip>       # upload a draft
+    python3 publish-edge.py --publish            # irreversible
+
+**🔑 Credentials are per PUBLISHER ACCOUNT, not per extension**, so the same pairs work for every
+add-on Chris owns: `EDGE_STORE_KEY`/`EDGE_CLIENT_ID` and `AMO_JWT_ISSUER`/`AMO_JWT_SECRET`. Both
+scripts deliberately read `domainintel.app/.env` rather than a copy — one source of truth, and no
+second place for a secret to sit. Do not duplicate them into this repo.
+
+⚠️ The AMO JWT is valid for at most five minutes; `publish-firefox.py` mints a fresh one per call.
+This closes the "blocked on credentials" note above: the blocker was never the accounts, it was
+that nobody had pointed the existing tooling at this extension.
