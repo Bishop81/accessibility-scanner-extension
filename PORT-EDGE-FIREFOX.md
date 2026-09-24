@@ -57,3 +57,35 @@ this can be scripted the way `overwatch/chrome_extension_publish.py` does for Ch
 
 **Order:** Edge first (no code change, so nothing to go wrong), then Firefox after the runtime test.
 Ping the backlinks lane when each is live — they are tracking these as listing-gap wins.
+
+## 🔴 2026-09-23 — the add-on ID had to be changed. AMO reserves IDs permanently.
+
+The first AMO submission was deleted and re-uploaded, which failed with **"duplicate add-on id
+found"**. AMO reserves add-on IDs forever, **including for deleted add-ons** — a deleted listing
+does not free its ID. There is no recovery and no support path; the ID is simply gone.
+
+    old (burned): accessibility-scanner@accessibilityscanner.app
+    new:          accessibility-scanner-webext@accessibilityscanner.app
+
+`firefox-src/manifest.json` and `dist/accessibility-scanner-firefox-0.3.1.zip` were rebuilt with
+the new ID, and `dist/firefox-unpacked/` re-extracted from that zip.
+
+**⚠️ Never delete an AMO listing to "start clean".** Each deletion burns another ID and forces a
+manifest change. To fix a bad submission, replace or abandon the *version* instead.
+
+### The 15 lint warnings, all accounted for (0 errors)
+
+| Count | Code | File |
+|---|---|---|
+| 9 | `DANGEROUS_EVAL` | `axe.min.js` — upstream axe-core |
+| 3 | `UNSAFE_VAR_ASSIGNMENT` | `popup.js` — all page-derived values pass through `escapeHtml()` |
+| 1 | `UNSAFE_VAR_ASSIGNMENT` | `axe.min.js` — upstream |
+| 2 | `KEY_FIREFOX*_UNSUPPORTED_BY_MIN_VERSION` | `manifest.json` — see below |
+
+**The two min-version warnings are deliberate, not a defect.** `data_collection_permissions`
+arrived in Firefox 140 (142 on Android) and `strict_min_version` is 115. Older Firefox ignores an
+unknown manifest key, so the declaration works on 140+ and costs nothing below it. **Raising the
+minimum to 140 to silence the warning would drop Firefox 115–139 for no functional gain** — and
+removing the key instead brings back `MISSING_DATA_COLLECTION_PERMISSIONS`. At a 115 floor those two
+warnings cannot both be satisfied; keeping the key is the better half of the trade. 115 is the real
+floor, set by `storage.session`.

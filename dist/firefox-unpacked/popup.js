@@ -1,0 +1,1453 @@
+// Runs in the popup. Injects axe-core into the active tab, runs the WCAG ruleset,
+// outlines offending elements on the page, and renders a summary here.
+
+const $ = (id) => document.getElementById(id);
+const IMPACTS = ['critical', 'serious', 'moderate', 'minor'];
+let lastScan = null;  // { v, url, result } — source for the exports
+const SCAN_VERSION = 2;  // bump when the result shape changes, so stale stored scans aren't restored
+
+async function activeTab() {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tab;
+}
+
+async function runScan() {
+    const tab = await activeTab();
+    if (!tab || /^(chrome|edge|about|chrome-extension):/.test(tab.url || '')) {
+        return showError("This page can't be scanned (browser/internal page). Open a normal website and try again.");
+    }
+
+    $('scan').disabled = true;
+    $('scan').textContent = 'Scanning…';
+
+    try {
+        // 1) inject axe-core, 2) run it + draw overlays, return the summary.
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['axe.min.js'] });
+        const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageScan });
+        renderResults(result);
+        lastScan = { v: SCAN_VERSION, url: tab.url, result };
+        // Persist so reopening the popup shows the same scan instead of a blank slate.
+        await chrome.storage.session.set({ ['scan_' + tab.id]: lastScan });
+    } catch (e) {
+        showError('Could not scan this page. ' + (e?.message || ''));
+    } finally {
+        $('scan').disabled = false;
+        $('scan').textContent = 'Scan this page';
+    }
+}
+
+async function clearOutlines() {
+    const tab = await activeTab();
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageClear });
+    await chrome.storage.session.remove('scan_' + tab.id);
+    // pageClear removes the tab-order overlay too, so the toggle must not claim it is showing.
+    tabOrderShown = false;
+    ['taborder', 'taborder2'].forEach((id) => { if ($(id)) $(id).textContent = 'Show tab order'; });
+    if ($('tabsummary')) $('tabsummary').classList.add('hidden');
+    $('results').classList.add('hidden');
+    $('error').classList.add('hidden');
+    $('intro').classList.remove('hidden');
+}
+
+function renderResults(r) {
+    if (!r) return showError('No result returned.');
+    $('intro').classList.add('hidden');
+    $('error').classList.add('hidden');
+    $('results').classList.remove('hidden');
+
+    const total = IMPACTS.reduce((s, k) => s + (r.counts[k] || 0), 0);
+    $('verdict').innerHTML = total === 0
+        ? `No automated violations. <span style="color:var(--ink-soft)">Some checks still need a human.</span>`
+        : `<span class="num" style="color:var(--critical)">${total}</span> automated ${total === 1 ? 'issue' : 'issues'} · ${r.affected} elements outlined`;
+
+    const tiles = [...IMPACTS.map((k) => [k, k, r.counts[k] || 0]), ['review', 'review', r.manualReview]];
+    $('scorecard').innerHTML = tiles.map(([cls, label, n]) =>
+        `<div class="tile t-${cls} ${n === 0 ? 'zero' : ''}"><div class="n">${n}</div><div class="l">${label}</div></div>`
+    ).join('');
+
+    const renderItem = (v, isReview) => `
+            <li>
+                <span class="fnum d-${isReview ? 'review' : (v.impact || 'minor')}" title="Matches the badge numbered ${v.num} on the page">${v.num}</span>
+                <span class="finding-main">
+                    <span class="finding-rule">${escapeHtml(v.id)}${isReview ? ' <span class="tag-review">needs review</span>' : ''}</span>
+                    <span class="finding-help">${escapeHtml(v.help)}.</span>
+                    ${v.helpUrl ? `<a class="finding-fix" href="${escapeHtml(v.helpUrl)}" target="_blank" rel="noopener noreferrer">How to fix ↗</a>` : ''}
+                </span>
+                <span class="finding-count">${v.count}×</span>
+            </li>`;
+    const items = [...r.list.map((v) => renderItem(v, false)), ...(r.review || []).map((v) => renderItem(v, true))];
+    $('findings').innerHTML = items.length === 0
+        ? `<li style="color:var(--ink-soft)">Nothing flagged by automated checks.</li>`
+        : items.join('');
+}
+
+function showError(msg) {
+    $('intro').classList.add('hidden');
+    $('results').classList.add('hidden');
+    $('error').classList.remove('hidden');
+    $('error').querySelector('.err').textContent = msg;
+}
+
+function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// Tab order is a toggle, not a scan: it needs no results and no network, and it is
+// useful on a page you have not scanned. Kept separate from the violation overlays
+// so turning one off does not wipe the other.
+let tabOrderShown = false;
+
+async function toggleTabOrder() {
+    const buttons = ['taborder', 'taborder2'].map((id) => $(id)).filter(Boolean);
+    const summary = $('tabsummary');
+    try {
+        const tab = await activeTab();
+        if (!tab) return;
+
+        if (tabOrderShown) {
+            await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageFocusClear });
+            tabOrderShown = false;
+            buttons.forEach((b) => { b.textContent = 'Show tab order'; });
+            if (summary) summary.classList.add('hidden');
+            return;
+        }
+
+        const [{ result }] = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: pageFocusOrder,
+        });
+        tabOrderShown = true;
+        buttons.forEach((b) => { b.textContent = 'Hide tab order'; });
+
+        if (summary && result) {
+            const notes = [];
+            if (result.positiveTabindex) notes.push(result.positiveTabindex + ' with a positive tabindex');
+            if (result.invisible) notes.push(result.invisible + ' tabbable but not visible');
+            // Says what it found, then says who decides. Whether an order makes sense is
+            // a human judgement (WCAG 2.4.3), and the extension must not pretend otherwise.
+            summary.textContent = result.stops + ' tab ' + (result.stops === 1 ? 'stop' : 'stops')
+                + (notes.length ? ' \u00b7 ' + notes.join(', ') : '')
+                + '. Follow the numbers to check the order makes sense.';
+            summary.classList.remove('hidden');
+        }
+    } catch (e) {
+        showError('Could not read this page. Chrome blocks extensions on its own pages and the Web Store.');
+        buttons.forEach((b) => { b.textContent = 'Show tab order'; });
+        tabOrderShown = false;
+    }
+}
+
+$('scan').addEventListener('click', runScan);
+$('rescan').addEventListener('click', runScan);
+$('clear').addEventListener('click', clearOutlines);
+['taborder', 'taborder2'].forEach((id) => $(id) && $(id).addEventListener('click', toggleTabOrder));
+$('copy').addEventListener('click', copyReport);
+$('json').addEventListener('click', exportJson);
+
+// ─── Exports: a Markdown report (paste into an AI agent / issue) + raw JSON ───
+
+function buildMarkdown(scan) {
+    const r = scan.result, order = ['critical', 'serious', 'moderate', 'minor'];
+    const total = order.reduce((s, k) => s + (r.counts[k] || 0), 0);
+    const indent = (s) => (s || '').replace(/\n+/g, '\n    ').trim();
+    let md = `# Accessibility report\n\n- URL: ${scan.url}\n- Engine: axe-core${r.engine ? ' ' + r.engine : ''}\n`;
+    md += `- Result: ${total === 0 ? 'no automated violations' : `${total} automated issue(s) across ${r.affected} element(s)`}\n\n`;
+    md += `> Covers the machine-testable subset of WCAG (2.0/2.1/2.2 A & AA + best-practice). Items needing manual review are not listed.\n`;
+    const byImpact = {};
+    for (const f of r.list) (byImpact[f.impact] || (byImpact[f.impact] = [])).push(f);
+    for (const imp of order) {
+        if (!byImpact[imp]) continue;
+        md += `\n## ${imp[0].toUpperCase() + imp.slice(1)}\n`;
+        for (const f of byImpact[imp]) {
+            md += `\n### ${f.id} — ${f.help} (${f.count} element${f.count === 1 ? '' : 's'})\n`;
+            if (f.helpUrl) md += `Fix guide: ${f.helpUrl}\n`;
+            for (const nd of (f.nodes || [])) {
+                md += `\n- selector: \`${nd.target}\`\n`;
+                if (nd.html) md += `    html: \`${nd.html.replace(/`/g, "'")}\`\n`;
+                if (nd.summary) md += `    issue: ${indent(nd.summary)}\n`;
+            }
+            if (f.count > (f.nodes || []).length) md += `\n_(+${f.count - f.nodes.length} more element(s) not listed)_\n`;
+        }
+    }
+    if (r.review && r.review.length) {
+        md += `\n## Needs manual review\n> axe could not decide these automatically; a person should check them.\n`;
+        for (const f of r.review) {
+            md += `\n### ${f.id} — ${f.help} (${f.count} element${f.count === 1 ? '' : 's'})\n`;
+            if (f.helpUrl) md += `Fix guide: ${f.helpUrl}\n`;
+            for (const nd of (f.nodes || [])) {
+                md += `\n- selector: \`${nd.target}\`\n`;
+                if (nd.html) md += `    html: \`${nd.html.replace(/`/g, "'")}\`\n`;
+                if (nd.summary) md += `    why: ${indent(nd.summary)}\n`;
+            }
+            if (f.count > (f.nodes || []).length) md += `\n_(+${f.count - f.nodes.length} more element(s) not listed)_\n`;
+        }
+    }
+    return md + `\n---\nGenerated by Accessibility Scanner — https://accessibilityscanner.app\n`;
+}
+
+function buildJson(scan) {
+    return JSON.stringify({
+        url: scan.url,
+        engine: 'axe-core' + (scan.result.engine ? ' ' + scan.result.engine : ''),
+        counts: scan.result.counts,
+        affectedElements: scan.result.affected,
+        manualReview: scan.result.manualReview,
+        passes: scan.result.passes,
+        findings: scan.result.list,
+        needsReview: scan.result.review || [],
+    }, null, 2);
+}
+
+function fileName(url, ext) {
+    let host = 'page';
+    try { host = new URL(url).hostname || 'page'; } catch (e) { /* keep default */ }
+    return `a11y-${host}.${ext}`;
+}
+
+async function copyReport() {
+    if (!lastScan) return;
+    const text = buildMarkdown(lastScan);
+    let ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; }
+    catch (e) {
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text; document.body.appendChild(ta); ta.select();
+            ok = document.execCommand('copy'); ta.remove();
+        } catch (e2) { ok = false; }
+    }
+    const btn = $('copy');
+    btn.dataset.label = btn.dataset.label || btn.textContent;
+    btn.textContent = ok ? 'Copied ✓' : 'Copy failed';
+    setTimeout(() => { btn.textContent = btn.dataset.label; }, 1400);
+}
+
+function exportJson() {
+    if (!lastScan) return;
+    const blob = new Blob([buildJson(lastScan)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = fileName(lastScan.url, 'json');
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// On reopen, restore the last scan for this tab — but only if its outlines are
+// still on the page (a reload wipes them, so we fall back to a fresh start).
+async function restore() {
+    try {
+        const tab = await activeTab();
+        if (!tab) return;
+        const key = 'scan_' + tab.id;
+        const saved = (await chrome.storage.session.get(key))[key];
+        if (!saved || saved.url !== tab.url || saved.v !== SCAN_VERSION) {
+            if (saved) await chrome.storage.session.remove(key);
+            return;
+        }
+        const [{ result: outlineCount }] = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => document.querySelectorAll('.a11ysc-ov').length,
+        });
+        if (!outlineCount) { await chrome.storage.session.remove(key); return; }
+        lastScan = saved;
+        renderResults(saved.result);
+    } catch (e) { /* leave the intro showing */ }
+}
+
+restore();
+
+// ─── Injected into the page (must be self-contained) ───
+
+async function pageScan() {
+    document.querySelectorAll('.a11ysc-ov, .a11ysc-bg, .a11ysc-tip').forEach((e) => e.remove());
+
+// executeScript serialises this whole function, so settlePage must be nested here
+// rather than imported — it cannot reach popup.js scope. Left un-indented on
+// purpose so it stays byte-for-byte identical to the other three surfaces.
+// ─── Page settle (runs in page context) ───
+// Scrolls the document so lazy-loaded content actually renders, then returns to
+// the top and waits for images, fonts and entrance transitions to finish.
+//
+// Without this we scan whatever happened to be above the fold. That understates
+// a page badly: on a Squarespace site we measured 3 contrast violations before
+// this and 12 after, identical colours, the other 9 simply had not rendered.
+// It also manufactures noise, since off-canvas elements come back from axe as
+// "outsideViewport" with no reading at all.
+//
+// Kept byte-identical across scripts/scan.mjs, the CLI, the MCP server and the
+// extension. Four surfaces that see different amounts of a page report different
+// results for it, which is the bug this fixes. If you edit one, edit all four.
+async function settlePage(options) {
+  const { stepRatio = 0.75, pauseMs = 150, maxMs = 12000, settleMs = 1200 } = options || {};
+  const started = Date.now();
+  const doc = document.documentElement;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const fullHeight = () => Math.max(doc.scrollHeight, document.body ? document.body.scrollHeight : 0);
+  // maxMs bounds this whole function, not just the scroll walk, so the caller
+  // can size its process timeout against one number.
+  const left = () => maxMs - (Date.now() - started);
+  const waitUpTo = (promise, ms) => Promise.race([promise, sleep(Math.max(0, ms))]);
+
+  // CSS smooth scrolling makes scrollTo asynchronous, so steps would overlap and
+  // observers would fire unpredictably. Forced off for the walk, restored after.
+  const priorBehavior = doc.style.scrollBehavior;
+  doc.style.scrollBehavior = 'auto';
+
+  try {
+    const step = Math.max(200, Math.round(window.innerHeight * stepRatio));
+    // Reserve room for the tail phases so a very long page can't consume the
+    // entire budget scrolling and leave nothing to render in.
+    const walkBudget = maxMs - settleMs - 1500;
+
+    // scrollHeight grows as content loads, so re-read it on every pass rather
+    // than computing the stop point once up front.
+    for (let y = 0, guard = 0; guard < 400; guard++) {
+      if (Date.now() - started > walkBudget || y >= fullHeight()) {
+        break;
+      }
+      window.scrollTo(0, y);
+      await sleep(pauseMs);
+      y += step;
+    }
+
+    // Footers usually carry the last lazy batch, and they are where contact
+    // details and legal links live, so they are worth an explicit stop.
+    window.scrollTo(0, fullHeight());
+    await sleep(pauseMs * 2);
+    window.scrollTo(0, 0);
+    await sleep(pauseMs);
+
+    // Images that only just entered the DOM still have to decode before their
+    // dimensions and colours can be measured.
+    const pending = Array.from(document.images).filter((img) => !img.complete);
+    if (pending.length && left() > settleMs) {
+      await waitUpTo(
+        Promise.all(pending.map((img) => new Promise((resolve) => {
+          img.addEventListener('load', resolve, { once: true });
+          img.addEventListener('error', resolve, { once: true });
+        }))),
+        Math.min(3000, left() - settleMs),
+      );
+    }
+
+    if (document.fonts && document.fonts.ready && left() > settleMs) {
+      await waitUpTo(document.fonts.ready, Math.min(2000, left() - settleMs));
+    }
+
+    // Entrance transitions must finish, or text gets measured mid-fade at an
+    // opacity that is not what a user ever sees.
+    await sleep(settleMs);
+  } finally {
+    doc.style.scrollBehavior = priorBehavior;
+  }
+}
+
+    await settlePage({ maxMs: 12000 });
+
+
+    const colors = { critical: '#b42318', serious: '#b54708', moderate: '#175cd3', minor: '#4a5567' };
+
+    const results = await window.axe.run(document, {
+        runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-practice'] },
+        resultTypes: ['violations', 'incomplete', 'passes'],
+    });
+
+    // Resolve the color-contrast results axe left "incomplete": gradients,
+    // background images and translucent overlays. The resolver below is
+    // byte-identical across all five scanners and guarded by
+    // ScannerSurfaceParityTest — edit one, edit all five.
+    try {
+      await resolveColorContrast(results);
+    } catch (e) { /* never let resolution break a scan */ }
+
+    // Focus-state contrast: controls that pass at rest and fail once focused.
+    // Runs AFTER axe and after the resolver, because it really focuses elements —
+    // which scrolls and can fire page JS. It restores scroll and focus when done.
+    try {
+      await checkFocusContrast(results);
+    } catch (e) { /* never let the focus pass break a scan */ }
+
+// ─── Gradient sampling (runs in page context) ───
+// Colour stops of a CSS gradient AND the colours the browser paints between them,
+// shared by resolveColorContrast and checkFocusContrast so the two can never disagree
+// about what a gradient means. Both call it as `gradientSampling(parseRgb)`, passing
+// their own browser-backed colour parser.
+//
+// Two colours mixed in sRGB can pass through a darker middle: black text on
+// linear-gradient(#ff0000, #00c800) measures 5.25:1 and 9.26:1 at the stops but 3.49:1
+// about 37% along, and stop-only checking called that a pass. Light text is safe from
+// this (luminance along an sRGB segment is convex, so its maximum is at a stop); dark
+// text is not, because the minimum can fall between.
+//
+// Each segment is sampled the way the browser paints it, with premultiplied alpha:
+//   - in the space the gradient names ("in srgb", "in srgb-linear", "in oklab");
+//   - otherwise sRGB when every stop uses legacy syntax (hex, rgb(), hsl(), keywords),
+//     and Oklab when any stop uses CSS Color 4 syntax, per CSS Images 4;
+//   - hue spaces (hsl, hwb, lch, oklch) and anything else unmodelled return null, as
+//     does a gradient with any stop that will not parse. Dropping a stop silently could
+//     remove the very colour the text fails against. Callers treat null as unmeasurable:
+//     the resolver leaves the finding as "needs review", the focus check reports nothing.
+// A hard edge (two adjacent stops at the same position) paints nothing between them,
+// so nothing is sampled there; sampling it would invent a colour and a false failure.
+function gradientSampling(parseRgb) {
+  // Commas outside parentheses only: a naive split tears
+  // "radial-gradient(120% 80% at 50% -10%, color(srgb ...), ...)" at its first inner comma.
+  const splitTop = (s) => {
+    const out = [];
+    let depth = 0, buf = '';
+    for (const ch of s) {
+      if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+      if (ch === ',' && depth === 0) { out.push(buf); buf = ''; continue; }
+      buf += ch;
+    }
+    if (buf.trim() !== '') out.push(buf);
+    return out.map((x) => x.trim());
+  };
+  // Revisions 3-4 measured a gradient only at its colour stops, on the premise that
+  // the worst case must sit at one. It need not.
+  // Revisions 3 and 4 measured a gradient only at its colour stops, on the premise that
+  // the worst case must sit at one. It need not. Two colours mixed in sRGB can pass
+  // through a darker middle: black text on linear-gradient(#ff0000, #00c800) measures
+  // 5.25:1 and 9.26:1 at the stops but 3.49:1 about 37% along, and was reported as a
+  // pass. Light text is safe from this (luminance along an sRGB segment is convex, so
+  // its maximum is at a stop); dark text is not, because the minimum can fall between.
+  //
+  // So each segment is sampled the way the browser paints it, with premultiplied alpha:
+  //   - in the space the gradient names ("in srgb", "in srgb-linear", "in oklab");
+  //   - otherwise sRGB when every stop uses legacy syntax (hex, rgb(), hsl(), keywords),
+  //     and Oklab when any stop uses CSS Color 4 syntax, per CSS Images 4;
+  //   - hue spaces (hsl, hwb, lch, oklch) and anything else unmodelled stay "needs
+  //     review", as does a gradient with any stop that will not parse. Dropping a stop
+  //     silently could remove the very colour the text fails against.
+  // A hard edge (two adjacent stops at the same position) paints nothing between them,
+  // so nothing is sampled there; sampling it would invent a colour and a false failure.
+  const SEGMENT_SAMPLES = 48;
+  const POSITION = /^(-?(\d+\.?\d*|\.\d+)(%|[a-z]+)?|calc\(.*\))$/i;
+  const splitSpaces = (s) => {
+    const out = [];
+    let depth = 0, buf = '';
+    for (const ch of s) {
+      if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+      if (depth === 0 && /\s/.test(ch)) { if (buf !== '') out.push(buf); buf = ''; continue; }
+      buf += ch;
+    }
+    if (buf !== '') out.push(buf);
+    return out;
+  };
+  const toLinear = (c) => { c /= 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+  const fromLinear = (c) => 255 * (c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055);
+  const toSpace = (c, space) => {
+    if (space === 'srgb') return [c.r, c.g, c.b];
+    const r = toLinear(c.r), g = toLinear(c.g), b = toLinear(c.b);
+    if (space === 'srgb-linear') return [r, g, b];
+    const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+    const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+    const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+    return [
+      0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+      1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+      0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    ];
+  };
+  const fromSpace = (v, space) => {
+    const k = (x) => Math.min(255, Math.max(0, x));
+    if (space === 'srgb') return { r: k(v[0]), g: k(v[1]), b: k(v[2]) };
+    let lin3 = v;
+    if (space === 'oklab') {
+      const l = (v[0] + 0.3963377774 * v[1] + 0.2158037573 * v[2]) ** 3;
+      const m = (v[0] - 0.1055613458 * v[1] - 0.0638541728 * v[2]) ** 3;
+      const s = (v[0] - 0.0894841775 * v[1] - 1.2914855480 * v[2]) ** 3;
+      lin3 = [
+        4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+        -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+      ];
+    }
+    return { r: k(fromLinear(lin3[0])), g: k(fromLinear(lin3[1])), b: k(fromLinear(lin3[2])) };
+  };
+  const mix = (a, b, t, space) => {
+    const alpha = a.a + (b.a - a.a) * t;
+    if (alpha <= 0) return { r: 0, g: 0, b: 0, a: 0 };
+    const pa = toSpace(a, space), pb = toSpace(b, space);
+    const v = [0, 1, 2].map((i) => (pa[i] * a.a + (pb[i] * b.a - pa[i] * a.a) * t) / alpha);
+    const out = fromSpace(v, space);
+    out.a = alpha;
+    return out;
+  };
+  const hardEdge = (p, q) => {
+    const a = (p || '').match(/^(-?[\d.]+)([a-z%]*)$/i), b = (q || '').match(/^(-?[\d.]+)([a-z%]*)$/i);
+    return !!(a && b && a[2].toLowerCase() === b[2].toLowerCase() && parseFloat(b[1]) <= parseFloat(a[1]));
+  };
+  // Stops (colours) and samples for one gradient layer, or null when either the stops
+  // or the interpolation space cannot be established.
+  const gradientCache = new Map();
+  const gradientLayer = (layer) => {
+    if (gradientCache.has(layer)) return gradientCache.get(layer);
+    let value = null;
+    const parts = splitTop(layer.slice(layer.indexOf('(') + 1, layer.lastIndexOf(')')));
+    let prelude = '';
+    const stops = [];
+    let readable = true;
+    for (let i = 0; i < parts.length && readable; i++) {
+      const tokens = splitSpaces(parts[i]);
+      if (tokens.length === 1 && POSITION.test(tokens[0])) continue;   // colour hint, or a bare angle
+      const positions = [];
+      while (tokens.length > 1 && POSITION.test(tokens[tokens.length - 1])) positions.unshift(tokens.pop());
+      const token = tokens.join(' ');
+      const c = parseRgb(token);
+      if (c) {
+        for (const p of positions.length ? positions : [null]) stops.push({ c, token, pos: p });
+      } else if (i === 0 && token.indexOf('(') === -1) {
+        prelude = parts[i];                      // "to right", "circle at 50% 50%", "90deg in oklab"
+      } else {
+        readable = false;
+      }
+    }
+    if (readable && stops.length) {
+      const named = prelude.match(/\bin\s+([a-z0-9-]+)/i);
+      const legacy = stops.every((s) => /^(#|rgba?\(|hsla?\(|[a-z]+$)/i.test(s.token));
+      const space = named ? named[1].toLowerCase() : legacy ? 'srgb' : 'oklab';
+      if (space === 'srgb' || space === 'srgb-linear' || space === 'oklab') {
+        const samples = [];
+        for (let i = 0; i < stops.length; i++) {
+          samples.push(stops[i].c);
+          if (i === stops.length - 1 || hardEdge(stops[i].pos, stops[i + 1].pos)) continue;
+          for (let k = 1; k < SEGMENT_SAMPLES; k++) samples.push(mix(stops[i].c, stops[i + 1].c, k / SEGMENT_SAMPLES, space));
+        }
+        value = { stops: stops.map((s) => s.c), samples };
+      }
+    }
+    gradientCache.set(layer, value);
+    return value;
+  };
+  return { gradientLayer };
+}
+// ─── Contrast resolution (runs in page context) ───
+// Turns axe's "incomplete" color-contrast results into real passes and failures.
+//
+// axe gives up whenever it cannot know the backdrop from CSS alone: a gradient, a
+// background image, or a translucent layer over either. That is honest of it, but
+// "needs review" is the least useful thing we can tell someone, and on image-heavy
+// marketing sites it is most of the contrast findings.
+//
+// Three sources of backdrop are resolved here:
+//   gradient — its colour stops AND the colours the browser mixes between them. The
+//              worst case is not always at a stop; see "Gradients" below.
+//   image    — rasterised to a canvas and sampled underneath the text.
+//   overlay  — translucent layers composited over whatever is beneath them, which
+//              is how a scrim over a hero photo actually renders.
+//
+// The worst case across every sample decides, matching how the gradient path already
+// worked: a heading that is legible over the light end of a photo and invisible over
+// the dark end is a real failure, and reporting the average would hide it.
+//
+// WHERE THIS STILL BAILS, AND WHY THAT IS DELIBERATE
+// A sample can be wrong in two directions, and only one of them is acceptable. Saying
+// "needs review" when we could have decided is a missed opportunity; saying "passes"
+// when the text is unreadable is the fake-compliance badge this product exists to
+// argue against. So anything not confidently derivable stays incomplete: cross-origin
+// images that taint the canvas, background-attachment: fixed, exotic background-size
+// or repeat keywords, images with no intrinsic size, and any decode failure.
+async function resolveColorContrast(results) {
+  const ci = results.incomplete.findIndex((r) => r.id === 'color-contrast');
+  if (ci === -1) return;
+  const entry = results.incomplete[ci];
+
+  const DEADLINE = (typeof performance !== 'undefined' ? performance.now() : Date.now()) + 6000;   // must leave room inside process_timeout_margin
+  // A backstop against a pathological page, not the real limiter — the time budget is.
+  // 40 was too low: our own homepage has 54 flagged nodes, so the cap silently left 14
+  // unresolved that the resolver could have decided. Gradient-only nodes need no async
+  // work at all, and rasters are cached per URL, so the common case is cheap.
+  const MAX_NODES = 500;
+  const GRID = 7;                // 49 samples per node is plenty to find a worst case
+  const overBudget = () => (typeof performance !== 'undefined' ? performance.now() : Date.now()) > DEADLINE;
+
+  // Split on commas that are NOT inside parentheses. A naive split tears
+  // "radial-gradient(120% 80% at 50% -10%, color(srgb ...), ...)" apart at its first
+  // internal comma, which silently produced zero colour stops and made every gradient
+  // on a modern site fall back to "needs review".
+  const splitTop = (s) => {
+    const out = [];
+    let depth = 0, buf = '';
+    for (const ch of s) {
+      if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+      if (ch === ',' && depth === 0) { out.push(buf); buf = ''; continue; }
+      buf += ch;
+    }
+    if (buf.trim() !== '') out.push(buf);
+    return out.map((x) => x.trim());
+  };
+
+  // Let the browser resolve colour tokens instead of pattern-matching them.
+  // Regexing rgb()/rgba() misses every modern syntax — color(srgb ...), oklch(), lab(),
+  // hwb(), color-mix() — and Tailwind v4 emits those by default, so the previous parser
+  // was blind to the gradients on most current sites. Painting one pixel handles any
+  // syntax the engine itself understands, now and later.
+  const swatch = document.createElement('canvas');
+  swatch.width = swatch.height = 1;
+  const swatchCtx = swatch.getContext('2d', { willReadFrequently: true });
+  const colorCache = new Map();
+  const parseRgb = (s) => {
+    const key = (s || '').trim();
+    if (!key || key === 'none') return null;
+    if (colorCache.has(key)) return colorCache.get(key);
+
+    let value = null;
+    // Fast path: plain rgb()/rgba() is the overwhelmingly common case.
+    const m = key.match(/^rgba?\(([^)]+)\)$/i);
+    if (m) {
+      const p = m[1].split(/[,\s/]+/).filter((x) => x !== '').map((x) => parseFloat(x));
+      if (p.length >= 3 && p.every((x) => isFinite(x))) {
+        value = { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+      }
+    }
+    if (!value) {
+      try {
+        // fillStyle silently ignores an invalid value, so prove it took by using a
+        // sentinel that the token cannot itself be.
+        swatchCtx.fillStyle = '#000000';
+        swatchCtx.fillStyle = key;
+        const accepted = swatchCtx.fillStyle;
+        swatchCtx.fillStyle = '#ffffff';
+        swatchCtx.fillStyle = key;
+        if (accepted === swatchCtx.fillStyle) {
+          swatchCtx.globalCompositeOperation = 'copy';   // no blend with what was there
+          swatchCtx.fillRect(0, 0, 1, 1);
+          const d = swatchCtx.getImageData(0, 0, 1, 1).data;
+          value = { r: d[0], g: d[1], b: d[2], a: d[3] / 255 };
+        }
+      } catch (e) {
+        value = null;
+      }
+    }
+    colorCache.set(key, value);
+    return value;
+  };
+  const lin = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+  const lum = (c) => 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b);
+  const contrast = (a, b) => {
+    const hi = Math.max(lum(a), lum(b)), lo = Math.min(lum(a), lum(b));
+    return (hi + 0.05) / (lo + 0.05);
+  };
+  // Source-over: place `top` (possibly translucent) on an opaque `base`.
+  const over = (top, base) => ({
+    r: top.a * top.r + (1 - top.a) * base.r,
+    g: top.a * top.g + (1 - top.a) * base.g,
+    b: top.a * top.b + (1 - top.a) * base.b,
+    a: 1,
+  });
+
+  const { gradientLayer } = gradientSampling(parseRgb);
+
+  // What the browser actually paints where nothing else is: html, then body, else white.
+  const canvasBase = (() => {
+    for (const el of [document.documentElement, document.body]) {
+      if (!el) continue;
+      const c = parseRgb(getComputedStyle(el).backgroundColor);
+      if (c && c.a === 1) return c;
+    }
+    return { r: 255, g: 255, b: 255, a: 1 };
+  })();
+
+  const num = (token, basis, fontPx) => {
+    const t = (token || '').trim();
+    if (t.endsWith('%')) return (parseFloat(t) / 100) * basis;
+    if (t.endsWith('px')) return parseFloat(t);
+    if (t.endsWith('em')) return parseFloat(t) * fontPx;
+    if (t.endsWith('rem')) return parseFloat(t) * 16;
+    return NaN;
+  };
+
+  // Decoded pixels per URL, shared across nodes: hero images repeat constantly and
+  // decoding one twice is the difference between a fast scan and a timeout.
+  const rasterCache = new Map();
+
+  async function raster(url) {
+    if (rasterCache.has(url)) return rasterCache.get(url);
+    let value = null;
+    try {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';   // same-origin unaffected; CORS-enabled remotes work
+      img.src = url;
+      await (img.decode ? img.decode() : new Promise((res, rej) => {
+        img.onload = res; img.onerror = rej;
+        setTimeout(rej, 4000);
+      }));
+      const w = img.naturalWidth, h = img.naturalHeight;
+      // An SVG with no intrinsic size rasterises at an arbitrary scale; refuse to guess.
+      if (!w || !h) throw new Error('no intrinsic size');
+      const cap = 600;                 // downscale: we need colour, not detail
+      const sw = Math.max(1, Math.min(w, cap)), sh = Math.max(1, Math.min(h, cap));
+      const cv = document.createElement('canvas');
+      cv.width = sw; cv.height = sh;
+      const ctx = cv.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0, sw, sh);
+      // Throws SecurityError on a tainted canvas — a cross-origin image without CORS.
+      const data = ctx.getImageData(0, 0, sw, sh);
+      value = { data, sw, sh, nw: w, nh: h };
+    } catch (e) {
+      value = null;                    // unknown, not "fine"
+    }
+    rasterCache.set(url, value);
+    return value;
+  }
+
+  // The background layers between the text and an opaque backdrop, nearest first.
+  function layersFor(el) {
+    const out = [];
+    for (let hop = el; hop; hop = hop.parentElement) {
+      const cs = getComputedStyle(hop);
+      const image = cs.backgroundImage || 'none';
+
+      if (image !== 'none') {
+        // Only the topmost layer is interpreted; stacked layers composite in ways
+        // that are not worth guessing at.
+        const first = splitTop(image)[0];
+        if (first.indexOf('gradient(') !== -1) {
+          const g = gradientLayer(first);
+          if (!g) return null;
+          out.push({ kind: 'gradient', stops: g.stops, samples: g.samples });
+        } else {
+          // background-attachment: fixed anchors the image to the viewport, so an
+          // element's own box no longer tells us which part of it sits behind the text.
+          // This restriction is specific to images: a gradient's stops are the same set
+          // wherever it is anchored, so the worst case is still knowable — bailing on
+          // `fixed` wholesale left every gradient on a fixed-background page unresolved.
+          if (splitTop(cs.backgroundAttachment || 'scroll')[0] === 'fixed') return null;
+          const m = first.match(/url\((['"]?)(.*?)\1\)/i);
+          if (!m || !m[2]) return null;
+          let abs;
+          try { abs = new URL(m[2], document.baseURI).href; } catch (e) { return null; }
+          out.push({ kind: 'image', url: abs, el: hop, cs });
+        }
+      }
+
+      const bc = parseRgb(cs.backgroundColor);
+      if (bc && bc.a > 0) {
+        out.push({ kind: 'color', color: bc });
+        if (bc.a === 1) return out;    // fully opaque: nothing below it shows through
+      }
+      // A gradient or image with no transparency also terminates the stack, but we
+      // cannot know that without sampling, so the sampler decides and we keep walking.
+      if (out.length && out[out.length - 1].kind !== 'color') {
+        const last = out[out.length - 1];
+        if (last.kind === 'gradient' && last.stops.every((s) => s.a === 1)) return out;
+        if (last.kind === 'image') return out;
+      }
+    }
+    return out;
+  }
+
+  // Candidate backdrop colours under `rect`, or null when they cannot be known.
+  async function backdropsUnder(layers, rect, fontPx) {
+    let base = [canvasBase];
+
+    for (let i = layers.length - 1; i >= 0; i--) {
+      const layer = layers[i];
+
+      if (layer.kind === 'color') {
+        base = base.map((b) => (layer.color.a === 1 ? layer.color : over(layer.color, b)));
+        continue;
+      }
+
+      if (layer.kind === 'gradient') {
+        const next = [];
+        for (const b of base) {
+          for (const s of layer.samples) next.push(s.a === 1 ? s : over(s, b));
+        }
+        base = next;
+        continue;
+      }
+
+      // image: sample the pixels that actually sit beneath the text
+      const r = await raster(layer.url);
+      if (!r) return null;
+
+      const box = layer.el.getBoundingClientRect();
+      if (!box.width || !box.height) return null;
+
+      const cs = layer.cs;
+      const size = splitTop(cs.backgroundSize || 'auto')[0];
+      const repeat = splitTop(cs.backgroundRepeat || 'repeat')[0];
+      if (/space|round/.test(repeat)) return null;
+
+      const ratio = r.nw / r.nh;
+      let dw, dh;
+      if (size === 'cover' || size === 'contain') {
+        const boxRatio = box.width / box.height;
+        const wide = size === 'cover' ? boxRatio < ratio : boxRatio > ratio;
+        if (wide) { dh = box.height; dw = dh * ratio; } else { dw = box.width; dh = dw / ratio; }
+      } else if (size === 'auto') {
+        dw = r.nw; dh = r.nh;
+      } else {
+        const parts = size.split(/\s+/);
+        const pw = parts[0], ph = parts.length > 1 ? parts[1] : 'auto';
+        dw = pw === 'auto' ? NaN : num(pw, box.width, fontPx);
+        dh = ph === 'auto' ? NaN : num(ph, box.height, fontPx);
+        if (!isFinite(dw) && !isFinite(dh)) return null;
+        if (!isFinite(dw)) dw = dh * ratio;
+        if (!isFinite(dh)) dh = dw / ratio;
+      }
+      if (!isFinite(dw) || !isFinite(dh) || dw <= 0 || dh <= 0) return null;
+
+      const pos = splitTop(cs.backgroundPosition || '0% 0%')[0].split(/\s+/);
+      const px = num(pos[0] === 'left' ? '0%' : pos[0] === 'right' ? '100%' : pos[0] === 'center' ? '50%' : pos[0], box.width - dw, fontPx);
+      const rawY = pos.length > 1 ? pos[1] : '50%';
+      const py = num(rawY === 'top' ? '0%' : rawY === 'bottom' ? '100%' : rawY === 'center' ? '50%' : rawY, box.height - dh, fontPx);
+      if (!isFinite(px) || !isFinite(py)) return null;
+
+      const repeatX = repeat === 'repeat' || repeat === 'repeat-x';
+      const repeatY = repeat === 'repeat' || repeat === 'repeat-y';
+
+      const samples = [];
+      for (let iy = 0; iy < GRID; iy++) {
+        for (let ix = 0; ix < GRID; ix++) {
+          // Inset slightly: the glyph edges are antialiased against the backdrop.
+          const fx = (ix + 0.5) / GRID, fy = (iy + 0.5) / GRID;
+          const sx = rect.left + fx * rect.width - box.left - px;
+          const sy = rect.top + fy * rect.height - box.top - py;
+
+          let u = sx, v = sy;
+          if (repeatX) u = ((sx % dw) + dw) % dw;
+          if (repeatY) v = ((sy % dh) + dh) % dh;
+          if (u < 0 || u >= dw || v < 0 || v >= dh) continue;   // outside the painted image
+
+          const ipx = Math.min(r.sw - 1, Math.max(0, Math.floor((u / dw) * r.sw)));
+          const ipy = Math.min(r.sh - 1, Math.max(0, Math.floor((v / dh) * r.sh)));
+          const o = (ipy * r.sw + ipx) * 4;
+          const a = r.data.data[o + 3] / 255;
+          const c = { r: r.data.data[o], g: r.data.data[o + 1], b: r.data.data[o + 2], a };
+          for (const b of base) samples.push(a === 1 ? c : over(c, b));
+        }
+      }
+      // Nothing landed on the image (e.g. no-repeat and the text sits outside it):
+      // whatever is beneath still applies, so carry on rather than bailing.
+      if (!samples.length) continue;
+      base = samples;
+    }
+
+    return base.length ? base : null;
+  }
+
+  const keep = [];
+  const failed = [];
+  let processed = 0;
+
+  for (const node of entry.nodes) {
+    try {
+      if (processed >= MAX_NODES || overBudget()) { keep.push(node); continue; }
+      processed++;
+
+      const sel = Array.isArray(node.target) ? node.target[node.target.length - 1] : node.target;
+      const el = document.querySelector(sel);
+      if (!el) { keep.push(node); continue; }
+
+      const cs = getComputedStyle(el);
+      const fg = parseRgb(cs.color);
+      if (!fg) { keep.push(node); continue; }
+
+      const rect = el.getBoundingClientRect();
+      if (!rect.width || !rect.height) { keep.push(node); continue; }
+
+      const fontPx = parseFloat(cs.fontSize) || 16;
+      const weight = parseInt(cs.fontWeight, 10) || 400;
+      const required = (fontPx >= 24 || (fontPx >= 18.66 && weight >= 700)) ? 3 : 4.5;
+
+      const layers = layersFor(el);
+      if (!layers || !layers.length) { keep.push(node); continue; }
+      if (!layers.some((l) => l.kind === 'image' || l.kind === 'gradient' || l.color.a < 1)) {
+        keep.push(node); continue;     // plain opaque colour: axe had another reason
+      }
+
+      const backdrops = await backdropsUnder(layers, rect, fontPx);
+      if (!backdrops) { keep.push(node); continue; }
+
+      let worst = Infinity;
+      for (const b of backdrops) worst = Math.min(worst, contrast(fg, b));
+      if (!isFinite(worst)) { keep.push(node); continue; }
+
+      if (worst < required) {
+        const what = layers.some((l) => l.kind === 'image')
+          ? 'a background image'
+          : layers.some((l) => l.kind === 'gradient') ? 'a gradient' : 'a translucent layer';
+        node.failureSummary =
+          'Element sits on ' + what + '. Measured at its lowest-contrast point the ratio is '
+          + worst.toFixed(2) + ':1, below the required ' + required + ':1.';
+        failed.push(node);
+      }
+      // worst >= required → legible everywhere it is painted → resolved, drop it
+    } catch (e) {
+      keep.push(node);                 // never turn an error into a pass
+    }
+  }
+
+  if (keep.length) { entry.nodes = keep; } else { results.incomplete.splice(ci, 1); }
+
+  if (failed.length) {
+    let v = results.violations.find((r) => r.id === 'color-contrast');
+    if (!v) {
+      v = {
+        id: entry.id, impact: entry.impact || 'serious', description: entry.description,
+        help: entry.help, helpUrl: entry.helpUrl, tags: entry.tags, nodes: [],
+      };
+      results.violations.push(v);
+    }
+    for (const n of failed) v.nodes.push(n);
+  }
+}
+
+// ─── Focus-state contrast (runs in page context) ───
+// Finds controls whose text contrast PASSES at rest and FAILS once focused.
+//
+// axe-core cannot report this: its only contrast rules are color-contrast (AA) and
+// color-contrast-enhanced (AAA), and both measure the default rendered state. There is
+// no focus-contrast rule in axe at all. So a button that reads white-on-teal normally
+// and white-on-pale-grey when tabbed to passes every automated check while being
+// unusable for the keyboard users who most depend on seeing the focused state.
+//
+// HOW THE FOCUS STATE IS MEASURED — AND WHY READING STYLESHEETS DOES NOT WORK
+// The first version of this read the CSS: find rules whose selector carries :focus,
+// strip the pseudo-class, test whether the element matches, apply those declarations.
+// It was fast, side-effect free, and WRONG. Validated against ground truth it reported
+// failures on 6 of 14 real shops where the rendered style does not change on focus at
+// all. Two reasons: it approximated the cascade by document order and so lost every
+// specificity contest, and it descended into @media groups without checking the query,
+// so a `@media print { a:focus { color: #999 } }` counted as if it applied on screen.
+//
+// A false "your site fails" is the fake-compliance badge inverted, so the browser now
+// decides. Each candidate is really focused and the computed style is read back. CSS is
+// still parsed, but only to pick candidates worth focusing — over-inclusion there is
+// harmless because the measurement no longer trusts it.
+//
+// focus({ focusVisible: true }) does produce :focus-visible in Chrome, including on
+// anchors, which was the original objection to this approach and turned out to be false.
+//
+// KNOWN LIMITS, deliberately not guessed at:
+//   - The focus pass runs AFTER axe, and restores scroll position and the previously
+//     focused element, but focusing can still fire page JavaScript.
+//   - Cross-origin stylesheets cannot be read, so a candidate whose only focus rule
+//     lives in a CDN sheet is never tried (14-21% of sheets on real sites).
+//   - A focus state over a background IMAGE is not resolved, only solid colours and
+//     gradients. Reporting nothing is the right failure there.
+//   - Only elements reachable by TAB count. tabindex="-1" is programmatically focusable
+//     only, so a keyboard user cannot land on it and there is no barrier.
+async function checkFocusContrast(results) {
+  const MAX_ELEMENTS = 400;
+  const DEADLINE = (typeof performance !== 'undefined' ? performance.now() : Date.now()) + 4000;
+  const overBudget = () => (typeof performance !== 'undefined' ? performance.now() : Date.now()) > DEADLINE;
+
+  const swatch = document.createElement('canvas');
+  swatch.width = swatch.height = 1;
+  const sctx = swatch.getContext('2d', { willReadFrequently: true });
+  const colorCache = new Map();
+
+  // Same browser-backed parse as the contrast resolver: regexing rgb() is blind to
+  // color(srgb ...), oklch() and friends, which current CSS emits by default.
+  const parseRgb = (s) => {
+    const key = (s || '').trim();
+    if (!key || key === 'none' || key === 'transparent') return null;
+    if (colorCache.has(key)) return colorCache.get(key);
+    let value = null;
+    const m = key.match(/^rgba?\(([^)]+)\)$/i);
+    if (m) {
+      const p = m[1].split(/[,\s/]+/).filter((x) => x !== '').map((x) => parseFloat(x));
+      if (p.length >= 3 && p.every((x) => isFinite(x))) {
+        value = { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+      }
+    }
+    if (!value) {
+      try {
+        sctx.fillStyle = '#000000';
+        sctx.fillStyle = key;
+        const accepted = sctx.fillStyle;
+        sctx.fillStyle = '#ffffff';
+        sctx.fillStyle = key;
+        if (accepted === sctx.fillStyle) {
+          sctx.globalCompositeOperation = 'copy';
+          sctx.fillRect(0, 0, 1, 1);
+          const d = sctx.getImageData(0, 0, 1, 1).data;
+          value = { r: d[0], g: d[1], b: d[2], a: d[3] / 255 };
+        }
+      } catch (e) { value = null; }
+    }
+    colorCache.set(key, value);
+    return value;
+  };
+
+  const lin = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+  const lum = (c) => 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b);
+  const contrast = (a, b) => {
+    const hi = Math.max(lum(a), lum(b)), lo = Math.min(lum(a), lum(b));
+    return (hi + 0.05) / (lo + 0.05);
+  };
+  const over = (top, base) => ({
+    r: top.a * top.r + (1 - top.a) * base.r,
+    g: top.a * top.g + (1 - top.a) * base.g,
+    b: top.a * top.b + (1 - top.a) * base.b,
+    a: 1,
+  });
+  const splitTop = (s) => {
+    const out = []; let depth = 0, buf = '';
+    for (const ch of s) {
+      if (ch === '(') depth++; else if (ch === ')') depth--;
+      if (ch === ',' && depth === 0) { out.push(buf); buf = ''; continue; }
+      buf += ch;
+    }
+    if (buf.trim() !== '') out.push(buf);
+    return out.map((x) => x.trim());
+  };
+  // A background-image value only counts if it actually names one. The `background`
+  // SHORTHAND expands to background-image: "initial" in CSSOM, and an earlier version
+  // treated that string as an image, failed to parse it as a gradient, and silently
+  // skipped every control whose focus rule used the shorthand — which is most of them.
+  const paintsImage = (v) => !!v && /(^|\s)(linear-|radial-|conic-|repeating-)?gradient\(|url\(/i.test(v);
+
+  // The same gradient treatment the contrast resolver uses: every stop plus the colours
+  // painted between them. Returns null when the gradient cannot be measured, and this
+  // check reports only failures, so null means "say nothing about this control".
+  const { gradientLayer } = gradientSampling(parseRgb);
+  const gradientColours = (image) => {
+    const first = splitTop(image)[0] || '';
+    if (first.indexOf('gradient(') === -1) return null;
+    const g = gradientLayer(first);
+    return g ? g.samples : null;
+  };
+  // Focusing runs inside a 4s budget, so refuse a combination big enough to blow it
+  // rather than spend the whole budget on one control.
+  const COMBINATION_CAP = 20000;
+
+  const canvasBase = (() => {
+    for (const el of [document.documentElement, document.body]) {
+      if (!el) continue;
+      const c = parseRgb(getComputedStyle(el).backgroundColor);
+      if (c && c.a === 1) return c;
+    }
+    return { r: 255, g: 255, b: 255, a: 1 };
+  })();
+
+  // Candidate backdrops behind an element, given its own background declarations.
+  // Returns null when the answer cannot be established (an image, most often).
+  const backdropsFor = (el, ownColor, ownImage) => {
+    let base = null;
+    for (let hop = el.parentElement; hop; hop = hop.parentElement) {
+      const cs = getComputedStyle(hop);
+      if (paintsImage(cs.backgroundImage)) {
+        const colours = gradientColours(cs.backgroundImage);
+        if (!colours) return null;                     // an image, or a gradient we cannot read
+        base = colours.filter((s) => s.a === 1);
+        if (base.length) break;
+        return null;
+      }
+      const bc = parseRgb(cs.backgroundColor);
+      if (bc && bc.a === 1) { base = [bc]; break; }
+    }
+    if (!base || !base.length) base = [canvasBase];
+
+    if (paintsImage(ownImage)) {
+      const colours = gradientColours(ownImage);
+      if (!colours) return null;
+      if (base.length * colours.length > COMBINATION_CAP) return null;
+      const out = [];
+      for (const b of base) for (const s of colours) out.push(s.a === 1 ? s : over(s, b));
+      return out;
+    }
+    if (ownColor && ownColor.a > 0) {
+      return base.map((b) => (ownColor.a === 1 ? ownColor : over(ownColor, b)));
+    }
+    return base;
+  };
+
+  const worstAgainst = (fg, backdrops) => {
+    let worst = Infinity;
+    for (const b of backdrops) worst = Math.min(worst, contrast(fg, b));
+    return worst;
+  };
+
+  // Every :focus / :focus-visible declaration that applies to el, in document order.
+  const focusRules = (() => {
+    const collected = [];
+    for (const sheet of Array.from(document.styleSheets)) {
+      let rules;
+      try { rules = sheet.cssRules; } catch (e) { continue; }   // cross-origin sheet
+      if (!rules) continue;
+      const walk = (list) => {
+        for (const rule of Array.from(list)) {
+          if (rule.cssRules && !rule.selectorText) { walk(rule.cssRules); continue; }  // @media etc
+          if (!rule.selectorText) continue;
+          if (!/:focus(-visible|-within)?\b/.test(rule.selectorText)) continue;
+          for (const sel of rule.selectorText.split(',')) {
+            const bare = sel.replace(/::?focus(-visible|-within)?\b/g, '').trim();
+            if (!bare) continue;
+            collected.push({ bare, style: rule.style });
+          }
+        }
+      };
+      walk(rules);
+    }
+    return collected;
+  })();
+
+  // Is this element worth the cost of focusing? Only a candidate filter — deliberately
+  // over-inclusive, since the real measurement below no longer trusts this answer.
+  const mightRestyleOnFocus = (el) => {
+    for (const { bare, style } of focusRules) {
+      if (!style.getPropertyValue('color')
+        && !style.getPropertyValue('background-color')
+        && !style.getPropertyValue('background-image')) continue;
+      try { if (el.matches(bare)) return true; } catch (e) { continue; }
+    }
+    return false;
+  };
+
+  const focusable = Array.from(document.querySelectorAll(
+    'a[href], button, input, select, textarea, [tabindex], [contenteditable="true"]'
+  ));
+
+  // A selector that resolves to THIS element and nothing else. "button.btn" is useless
+  // in a report — a page has forty of them, so the reader cannot find the one we mean and
+  // cannot check our claim. Walks up adding :nth-of-type until the path is unambiguous,
+  // which is what axe does for the same reason.
+  const uniqueSelector = (el) => {
+    if (el.id && document.querySelectorAll('#' + CSS.escape(el.id)).length === 1) {
+      return '#' + CSS.escape(el.id);
+    }
+    const parts = [];
+    for (let node = el; node && node.nodeType === 1 && node !== document.documentElement; node = node.parentElement) {
+      let part = node.tagName.toLowerCase();
+      if (node.id && document.querySelectorAll('#' + CSS.escape(node.id)).length === 1) {
+        parts.unshift('#' + CSS.escape(node.id));
+        break;
+      }
+      const siblings = node.parentElement
+        ? Array.from(node.parentElement.children).filter((c) => c.tagName === node.tagName)
+        : [node];
+      if (siblings.length > 1) part += ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')';
+      parts.unshift(part);
+      const candidate = parts.join(' > ');
+      try { if (document.querySelectorAll(candidate).length === 1) return candidate; } catch (e) { /* keep going */ }
+    }
+    const joined = parts.join(' > ');
+    return joined || el.tagName.toLowerCase();
+  };
+
+  const failed = [];
+  let focusedCount = 0;
+
+  // Focusing scrolls and moves the caret, so remember what to put back.
+  const scrollX = window.scrollX, scrollY = window.scrollY;
+  const previouslyFocused = document.activeElement;
+
+  const snapshot = (el) => {
+    const cs = getComputedStyle(el);
+    return { color: cs.color, bg: cs.backgroundColor, img: cs.backgroundImage,
+             fontPx: parseFloat(cs.fontSize) || 16, weight: parseInt(cs.fontWeight, 10) || 400 };
+  };
+
+  try {
+    for (const el of focusable) {
+      try {
+        if (focusedCount >= MAX_ELEMENTS || overBudget()) break;
+
+        if (el.disabled) continue;
+        const ti = el.getAttribute('tabindex');
+        if (ti !== null && parseInt(ti, 10) < 0) continue;
+        if (el.closest('[aria-hidden="true"]')) continue;
+        if (!el.offsetParent && getComputedStyle(el).position !== 'fixed') continue;
+        if (!mightRestyleOnFocus(el)) continue;
+
+        const rest = snapshot(el);
+        const restFg = parseRgb(rest.color);
+        if (!restFg) continue;
+
+        focusedCount++;
+        try { el.focus({ focusVisible: true }); } catch (e) { try { el.focus(); } catch (e2) { continue; } }
+        if (document.activeElement !== el) continue;      // refused focus: nothing to measure
+        const foc = snapshot(el);
+        try { el.blur(); } catch (e) { /* ignore */ }
+
+        // The browser says nothing changed, so there is no focus-state failure. This is
+        // the check the stylesheet version lacked, and it is what makes the result true.
+        if (foc.color === rest.color && foc.bg === rest.bg && foc.img === rest.img) continue;
+
+        const required = (rest.fontPx >= 24 || (rest.fontPx >= 18.66 && rest.weight >= 700)) ? 3 : 4.5;
+
+        const restBackdrops = backdropsFor(el, parseRgb(rest.bg), rest.img);
+        if (!restBackdrops) continue;
+        const restRatio = worstAgainst(restFg, restBackdrops);
+        // Already failing at rest? axe's own color-contrast rule reports that; saying it
+        // twice is noise, and the interesting claim is specifically the state CHANGE.
+        if (!isFinite(restRatio) || restRatio < required) continue;
+
+        const focusFg = parseRgb(foc.color);
+        if (!focusFg) continue;
+        const focusBackdrops = backdropsFor(el, parseRgb(foc.bg), foc.img);
+        if (!focusBackdrops) continue;
+        const focusRatio = worstAgainst(focusFg, focusBackdrops);
+        if (!isFinite(focusRatio) || focusRatio >= required) continue;
+
+        const selector = uniqueSelector(el);
+
+        failed.push({
+          target: [selector],
+          html: (el.outerHTML || '').slice(0, 4096),
+          impact: 'serious',
+          failureSummary:
+            'Element passes contrast at rest (' + restRatio.toFixed(2) + ':1) but drops to '
+            + focusRatio.toFixed(2) + ':1 when focused, below the required ' + required
+            + ':1. Keyboard users see only the focused state.',
+        });
+      } catch (e) { /* one bad element must never cost the rest */ }
+    }
+  } finally {
+    try { if (previouslyFocused && previouslyFocused.focus) previouslyFocused.focus(); } catch (e) { /* ignore */ }
+    try { if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur(); } catch (e) { /* ignore */ }
+    window.scrollTo(scrollX, scrollY);
+  }
+
+  if (failed.length) {
+    results.violations.push({
+      id: 'color-contrast-focus',
+      impact: 'serious',
+      description: 'Ensure text keeps sufficient contrast when its control is focused',
+      help: 'Focused controls must still meet the contrast minimum',
+      // 1.4.3 is the criterion: this is still contrast of text, measured in the state a
+      // keyboard user actually sees.
+      helpUrl: 'https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum.html',
+      tags: ['cat.color', 'wcag2aa', 'wcag143'],
+      nodeCount: failed.length,
+      nodes: failed,
+    });
+  }
+}
+
+
+    const counts = { critical: 0, serious: 0, moderate: 0, minor: 0 };
+    const list = [];
+    const review = [];
+    let n = 0;       // violation elements outlined (for the summary line)
+    let fnum = 0;    // finding number: shown on every badge for that rule + in the list
+
+    const slimNodes = (nodes) => nodes.slice(0, 30).map((nd) => ({
+        target: Array.isArray(nd.target) ? nd.target.join(' ') : String(nd.target),
+        summary: (nd.failureSummary || '').trim(),
+        html: (nd.html || '').slice(0, 300),
+    }));
+
+    // Outline one element + attach its hover badge. Returns true if it was drawn.
+    const draw = (node, num, color, dashed, ruleId, impact) => {
+        let el;
+        try { el = document.querySelector(Array.isArray(node.target) ? node.target[0] : node.target); } catch (e) { el = null; }
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 && r.height === 0) return false;
+        const x = r.left + window.scrollX, y = r.top + window.scrollY;
+
+        const box = document.createElement('div');
+        box.className = 'a11ysc-ov';
+        Object.assign(box.style, {
+            position: 'absolute', left: x + 'px', top: y + 'px',
+            width: r.width + 'px', height: r.height + 'px',
+            border: '2px ' + (dashed ? 'dashed' : 'solid') + ' ' + color, borderRadius: '2px',
+            boxShadow: '0 0 0 1px rgba(255,255,255,.55)', zIndex: 2147483646, pointerEvents: 'none',
+        });
+        document.body.appendChild(box);
+
+        const summary = (node.failureSummary || '').trim();
+        const detail = '#' + num + '  ' + (dashed ? 'needs review: ' : '') + ruleId + '  (' + impact + ')'
+            + (summary ? '\n\n' + summary.slice(0, 500) : '');
+
+        const badge = document.createElement('div');
+        badge.className = 'a11ysc-bg';
+        badge.textContent = num;
+        // Native title tooltip: survives the injected-script context (a custom JS
+        // tooltip's listeners do not), and shows the full detail on hover.
+        badge.title = detail;
+        Object.assign(badge.style, {
+            position: 'absolute', left: x + 'px', top: Math.max(0, y - 18) + 'px',
+            background: color, color: '#fff', font: '600 11px/1.4 ui-monospace,monospace',
+            padding: '0 5px', borderRadius: '3px', zIndex: 2147483647, pointerEvents: 'auto', cursor: 'help',
+        });
+        document.body.appendChild(badge);
+        return true;
+    };
+
+    for (const v of results.violations) {
+        fnum++;
+        counts[v.impact] = (counts[v.impact] || 0) + 1;
+        list.push({ num: fnum, id: v.id, impact: v.impact, help: v.help, helpUrl: v.helpUrl, count: v.nodes.length, nodes: slimNodes(v.nodes) });
+        const color = colors[v.impact] || colors.minor;
+        for (const node of v.nodes) { if (draw(node, fnum, color, false, v.id, v.impact || 'minor')) n++; }
+    }
+
+    // Needs manual review: axe couldn't decide automatically. Dashed purple so it
+    // reads as "check this", not "definite failure".
+    for (const v of results.incomplete) {
+        fnum++;
+        review.push({ num: fnum, id: v.id, impact: 'review', help: v.help, helpUrl: v.helpUrl, count: v.nodes.length, nodes: slimNodes(v.nodes) });
+        for (const node of v.nodes) { draw(node, fnum, '#6941c6', true, v.id, 'review'); }
+    }
+
+    return {
+        counts, affected: n, manualReview: results.incomplete.length,
+        passes: results.passes.length, list, review,
+        engine: results.testEngine && results.testEngine.version,
+    };
+}
+
+function pageClear() {
+    document.querySelectorAll('.a11ysc-ov, .a11ysc-bg, .a11ysc-tip, .a11ysc-fo, .a11ysc-fob').forEach((e) => e.remove());
+}
+
+// ─── Focus-order visualiser (injected into the page; must be self-contained) ───
+//
+// Numbers every tab stop in order, so you can SEE the keyboard path through a page.
+//
+// It deliberately shows rather than judges. WCAG 2.4.3 Focus Order is a manual
+// criterion: whether an order "makes sense" is a human decision about content, and
+// our own Section 508 checklist says so. A tool announcing "focus order is wrong"
+// would be inventing a verdict it cannot support. Numbered badges let a person see
+// a bad order in one glance and decide for themselves.
+//
+// Only two things are flagged automatically, both objectively detectable and
+// neither a matter of judgement:
+//   positive tabindex  an authoring hack that reorders the whole document
+//   invisible stop     tabbable but not visible, so a keyboard user lands nowhere
+// Anything softer is left unflagged on purpose. The CSSOM version of the
+// focus-contrast check taught this the hard way: it predicted rendered state and
+// reported failures on 6 of 14 real sites that had none.
+//
+// FOCUSABILITY IS DETERMINED BY THE BROWSER, not by the selector. Each candidate is
+// actually focused and checked against document.activeElement, for the same reason
+// the focus-contrast check does it: a stylesheet or an attribute list cannot tell
+// you what the browser will really do.
+async function pageFocusOrder() {
+    document.querySelectorAll('.a11ysc-fo, .a11ysc-fob').forEach((e) => e.remove());
+
+    const CANDIDATES = [
+        'a[href]', 'area[href]', 'button', 'input', 'select', 'textarea', 'summary',
+        'iframe', 'object', 'embed', 'audio[controls]', 'video[controls]',
+        '[contenteditable]', '[tabindex]',
+    ].join(',');
+
+    const previouslyFocused = document.activeElement;
+    const scrollX = window.scrollX, scrollY = window.scrollY;
+
+    const stops = [];
+    let positiveTabindex = 0, invisible = 0;
+
+    try {
+        const candidates = [...document.querySelectorAll(CANDIDATES)];
+
+        for (const el of candidates) {
+            if (el.disabled || el.closest('[inert]')) continue;
+
+            const cs = getComputedStyle(el);
+            // display:none and visibility:hidden remove an element from the tab order
+            // entirely, so they are not "invisible stops" — they are not stops at all.
+            if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+
+            const ti = el.getAttribute('tabindex');
+            const tabindex = ti === null ? null : parseInt(ti, 10);
+            if (tabindex !== null && !Number.isNaN(tabindex) && tabindex < 0) continue;   // removed from the order
+
+            // Ask the browser rather than guessing.
+            let focusable = false;
+            try {
+                el.focus({ preventScroll: true });
+                focusable = document.activeElement === el;
+            } catch (e) { focusable = false; }
+            if (!focusable) continue;
+
+            const r = el.getBoundingClientRect();
+            const hidden = (r.width === 0 && r.height === 0)
+                || r.bottom < 0 || r.right < 0
+                || r.top > document.documentElement.scrollHeight
+                || cs.opacity === '0';
+
+            stops.push({ el, tabindex, rect: r, hidden });
+        }
+
+        // The documented order: positive tabindex first, ascending, then everything
+        // else in document order. Stable within equal values, which is what the spec
+        // requires and what array order already gives us.
+        const positive = stops.filter((s) => s.tabindex !== null && s.tabindex > 0)
+            .sort((a, b) => a.tabindex - b.tabindex);
+        const natural = stops.filter((s) => !(s.tabindex !== null && s.tabindex > 0));
+        const ordered = [...positive, ...natural];
+
+        ordered.forEach((stop, i) => {
+            const num = i + 1;
+            const flags = [];
+            if (stop.tabindex !== null && stop.tabindex > 0) { flags.push('positive tabindex (' + stop.tabindex + ')'); positiveTabindex++; }
+            if (stop.hidden) { flags.push('tabbable but not visible'); invisible++; }
+
+            const flagged = flags.length > 0;
+            const color = flagged ? '#b54708' : '#0d5c54';
+
+            // Re-measure: focusing earlier elements can have scrolled the page.
+            const r = stop.el.getBoundingClientRect();
+            const x = r.left + window.scrollX, y = r.top + window.scrollY;
+
+            if (r.width > 0 || r.height > 0) {
+                const box = document.createElement('div');
+                box.className = 'a11ysc-fo';
+                Object.assign(box.style, {
+                    position: 'absolute', left: x + 'px', top: y + 'px',
+                    width: r.width + 'px', height: r.height + 'px',
+                    border: '2px ' + (flagged ? 'dashed' : 'solid') + ' ' + color, borderRadius: '2px',
+                    boxShadow: '0 0 0 1px rgba(255,255,255,.55)', zIndex: 2147483646, pointerEvents: 'none',
+                });
+                document.body.appendChild(box);
+            }
+
+            const badge = document.createElement('div');
+            badge.className = 'a11ysc-fob';
+            badge.textContent = num;
+            badge.title = 'Tab stop ' + num + ' of ' + ordered.length
+                + '\n<' + stop.el.tagName.toLowerCase() + '>'
+                + (stop.el.id ? ' #' + stop.el.id : '')
+                + (flagged ? '\n\n' + flags.join('\n') : '')
+                + (stop.hidden ? '\n\nA keyboard user tabs here and sees no focus indicator anywhere on screen.' : '');
+            Object.assign(badge.style, {
+                position: 'absolute',
+                // Hidden stops have no useful geometry, so stack their badges down the
+                // left edge instead of drawing them somewhere off-canvas.
+                left: (stop.hidden ? window.scrollX + 4 : x) + 'px',
+                top: (stop.hidden ? window.scrollY + 4 + (invisible - 1) * 20 : Math.max(0, y - 18)) + 'px',
+                background: color, color: '#fff', font: '600 11px/1.4 ui-monospace,monospace',
+                padding: '0 5px', borderRadius: '3px', zIndex: 2147483647, pointerEvents: 'auto', cursor: 'help',
+            });
+            document.body.appendChild(badge);
+        });
+
+        return { stops: ordered.length, positiveTabindex, invisible };
+    } finally {
+        // Leave the page as we found it. Focusing elements moves focus and can scroll.
+        //
+        // body and documentElement are excluded deliberately. They have a focus()
+        // method but are not focusable, so calling it is a silent no-op that leaves
+        // focus parked on the LAST tab stop we visited. Verified: on a page where
+        // nothing was focused to begin with, this left document.activeElement on a
+        // link, which moves a keyboard user's position out from under them.
+        try {
+            const restorable = previouslyFocused
+                && previouslyFocused !== document.body
+                && previouslyFocused !== document.documentElement
+                && typeof previouslyFocused.focus === 'function';
+
+            if (restorable) {
+                previouslyFocused.focus({ preventScroll: true });
+            } else if (document.activeElement && typeof document.activeElement.blur === 'function') {
+                document.activeElement.blur();
+            }
+        } catch (e) { /* not worth failing the visualisation over */ }
+        window.scrollTo(scrollX, scrollY);
+    }
+}
+
+function pageFocusClear() {
+    document.querySelectorAll('.a11ysc-fo, .a11ysc-fob').forEach((e) => e.remove());
+}
