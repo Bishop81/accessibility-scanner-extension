@@ -37,10 +37,23 @@
         <p id="coverage" class="coverage">Automated checks catch the machine-testable subset of WCAG. Items marked “review” still need a human. We don’t fake compliance.</p>
     </div>
 
+    <div id="edges" class="pad edges">
+        <div class="edges-row">
+            <button id="edgesbtn" class="btn-ghost">Show contrast edges</button>
+            <select id="edgesmin" aria-label="Contrast threshold">
+                <option value="4.5">4.5:1 text</option>
+                <option value="3">3:1 large/UI</option>
+                <option value="7">7:1 AAA</option>
+            </select>
+        </div>
+        <p id="edgessummary" class="fineprint hidden"></p>
+    </div>
+
     <div id="error" class="hidden pad">
         <p class="err"></p>
     </div>
 
+    <script src="contrast-edges.js"></script>
     <script src="popup.js"></script>
 </body>
 </html>

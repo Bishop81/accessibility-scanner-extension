@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.4.0
+
+### See contrast the way the page actually renders
+
+"Show contrast edges" takes a screenshot of the visible part of the page and redraws it in
+black and white: every edge with at least the chosen contrast ratio is white, everything else
+is black. Text with enough contrast stays readable as an outline. Text without it disappears.
+
+It works from the rendered pixels, not from the CSS, so it covers the cases a code-based check
+cannot judge: text over photos and video, over gradients, under translucent overlays, and with
+blend modes or text shadows. Pick 4.5:1 for body text, 3:1 for large text and UI components,
+or 7:1 for AAA.
+
+Each pixel is judged against the lightest and darkest pixels around it, not just its immediate
+neighbor. Text edges are anti-aliased, so the pixel next to a glyph is a blend of the two colors,
+and a neighbor-to-neighbor comparison would understate the contrast and break up text that
+passes.
+
+Like the tab-order view, it shows rather than judges. Thin text at 100% zoom can have no pixel
+that carries its true color, so text close to the threshold can look broken. The popup says so
+when the capture is low resolution. Zoom the page in and re-run to check small text.
+
+Scan outlines are hidden while the screenshot is taken, so they are not measured as page content.
+The view closes on click, Escape or scroll, because after a scroll it would no longer line up with
+the page.
+
+No new permissions: the screenshot uses the same click-to-activate access the scan already has.
+
 ## 0.3.1
 
 ### Contrast over a gradient is measured across the whole gradient
