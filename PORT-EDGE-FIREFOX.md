@@ -123,3 +123,21 @@ second place for a secret to sit. Do not duplicate them into this repo.
 ⚠️ The AMO JWT is valid for at most five minutes; `publish-firefox.py` mints a fresh one per call.
 This closes the "blocked on credentials" note above: the blocker was never the accounts, it was
 that nobody had pointed the existing tooling at this extension.
+
+## 0.4.0 packages — built 2026-11-10, NOT yet uploaded to either store
+
+    dist/accessibility-scanner-edge-0.4.0.zip      same 12 files as the Chrome 0.4.0 release
+    dist/accessibility-scanner-firefox-0.4.0.zip   + browser-shim.js, firefox-src manifest/popup.html
+    dist/firefox-unpacked/                          re-extracted from the 0.4.0 zip
+
+New shipping file in both: **`contrast-edges.js`**. `web-ext lint`: 0 errors, the same 15 warnings
+as 0.3.1 (table above), so the new code adds none.
+
+**⚠️ Firefox needs a runtime test of the new button before upload.** "Show contrast edges" calls
+`tabs.captureVisibleTab`, which no earlier version used. It relies on the `activeTab` grant from
+clicking the toolbar button; nothing in this repo has exercised that on Firefox, and if Firefox wants
+`<all_urls>` instead, adding it would put a new install-time warning on the listing. Load
+`dist/firefox-unpacked/manifest.json` via `about:debugging`, open any site, click the button.
+The Chrome build was tested end to end in headless Chromium, but with a test-only `<all_urls>` copy,
+since a script cannot click the toolbar — so the real `activeTab` path is unverified on Chrome too
+until someone clicks it.

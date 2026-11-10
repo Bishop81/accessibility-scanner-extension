@@ -107,3 +107,8 @@ header {
 .hint { margin: 10px 0 0; font: 11.5px/1.4 ui-monospace, monospace; color: var(--ink-soft); }
 .coverage { margin: 0; padding: 8px 16px 14px; font-size: 11px; color: var(--ink-soft); }
 .err { color: var(--critical); }
+
+.edges { border-top: 1px solid var(--hairline); }
+.edges-row { display: flex; gap: 8px; }
+.edges-row select { flex: none; padding: 0 6px; background: transparent; border: 1px solid var(--hairline); border-radius: 8px; font: 500 12px/1 inherit; color: var(--ink); }
+.edges .fineprint { margin-top: 8px; }
