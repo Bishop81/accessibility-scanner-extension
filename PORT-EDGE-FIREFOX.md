@@ -146,3 +146,10 @@ clicking the toolbar button; nothing in this repo has exercised that on Firefox,
 The Chrome build was tested end to end in headless Chromium, but with a test-only `<all_urls>` copy,
 since a script cannot click the toolbar — so the real `activeTab` path is unverified on Chrome too
 until someone clicks it.
+
+## 0.4.1 — 2026-11-10
+
+Chrome 0.4.1 `--publish`ed (PENDING_REVIEW, 0.4.0 live) and Firefox 0.4.1 queued on AMO (valid, 0 errors,
+15 warnings). **Edge held back**: 0.4.0 is still in certification there; `dist/accessibility-scanner-edge-0.4.1.zip`
+is built and waiting. New shipping file `background.js`; Firefox loads it as a background script after
+`browser-shim.js` and `contrast-edges.js`.
