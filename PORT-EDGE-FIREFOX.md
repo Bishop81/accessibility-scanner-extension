@@ -124,7 +124,12 @@ second place for a secret to sit. Do not duplicate them into this repo.
 This closes the "blocked on credentials" note above: the blocker was never the accounts, it was
 that nobody had pointed the existing tooling at this extension.
 
-## 0.4.0 packages — built 2026-11-10, NOT yet uploaded to either store
+## 0.4.0 packages — built and SUBMITTED 2026-11-10 (Chris: "yes, upload firefox and edge")
+
+Edge: package validation Succeeded, submitted for certification. Firefox: AMO validation valid,
+0 errors / 15 warnings, version 0.4.0 created on the listed channel, queued for review; 0.3.1 stays
+public until it clears. **Uploaded WITHOUT the Firefox runtime test below**, at Chris's call — if
+`captureVisibleTab` is refused on Firefox, only the new button fails; scanning is unaffected.
 
     dist/accessibility-scanner-edge-0.4.0.zip      same 12 files as the Chrome 0.4.0 release
     dist/accessibility-scanner-firefox-0.4.0.zip   + browser-shim.js, firefox-src manifest/popup.html
