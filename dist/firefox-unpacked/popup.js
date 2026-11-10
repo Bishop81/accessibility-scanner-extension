@@ -139,9 +139,9 @@ async function toggleTabOrder() {
     }
 }
 
-// Contrast edges: screenshot the visible area, keep only edges that meet the chosen
-// ratio, and lay the result over the page. Toggle state lives in the page, not here,
-// because the popup closes the moment you click the page and forgets everything.
+// Contrast edges. The capture and the re-captures after scrolling run in background.js,
+// because this popup closes (and stops running) the moment you click the page. Toggle
+// state lives in the page for the same reason.
 async function toggleEdges() {
     const btn = $('edgesbtn'), summary = $('edgessummary');
     const min = parseFloat($('edgesmin').value) || 4.5;
@@ -160,33 +160,12 @@ async function toggleEdges() {
         }
 
         btn.textContent = 'Capturing…';
-        // Our own outlines and badges would be measured as page content, so they are
-        // hidden for the capture and put back straight after.
-        await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageOverlaysHide });
-        let shot;
-        try {
-            shot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-        } finally {
-            await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageOverlaysRestore });
-        }
+        const r = await chrome.runtime.sendMessage({ type: 'a11ysc-edges-start', tabId: tab.id, windowId: tab.windowId, min });
+        if (!r || !r.ok) throw new Error((r && r.error) || 'No response from the capture.');
 
-        const img = new Image();
-        img.src = shot;
-        await img.decode();
-        const w = img.naturalWidth, h = img.naturalHeight;
-        const canvas = new OffscreenCanvas(w, h);
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        ctx.drawImage(img, 0, 0);
-        const { pixels } = contrastEdgeMap(ctx.getImageData(0, 0, w, h).data, w, h, min);
-        ctx.putImageData(new ImageData(pixels, w, h), 0, 0);
-        const url = await blobToDataUrl(await canvas.convertToBlob({ type: 'image/png' }));
-
-        const [{ result: cssWidth }] = await chrome.scripting.executeScript({
-            target: { tabId: tab.id }, func: pageEdgesShow, args: [url, min],
-        });
         btn.textContent = 'Hide contrast edges';
-        summary.textContent = 'White edges meet ' + min + ':1. Text that vanished falls below it. Visible area only; scrolling closes the view.'
-            + (w / (cssWidth || w) < 1.75 ? ' At this resolution, thin text near the threshold can break up: zoom in (Ctrl +) and re-run to check small text.' : '');
+        summary.textContent = 'White edges meet ' + min + ':1. Text that vanished falls below it. Scroll and it redraws; click or Esc closes it.'
+            + (r.width / (r.cssWidth || r.width) < 1.75 ? ' At this resolution, thin text near the threshold can break up: zoom in (Ctrl +) and re-run to check small text.' : '');
         summary.classList.remove('hidden');
     } catch (e) {
         btn.textContent = 'Show contrast edges';
@@ -194,15 +173,6 @@ async function toggleEdges() {
     } finally {
         btn.disabled = false;
     }
-}
-
-function blobToDataUrl(blob) {
-    return new Promise((resolve, reject) => {
-        const r = new FileReader();
-        r.onload = () => resolve(r.result);
-        r.onerror = () => reject(r.error);
-        r.readAsDataURL(blob);
-    });
 }
 
 $('edgesbtn').addEventListener('click', toggleEdges);
@@ -1376,79 +1346,12 @@ function pageClear() {
     document.querySelectorAll('.a11ysc-ov, .a11ysc-bg, .a11ysc-tip, .a11ysc-fo, .a11ysc-fob').forEach((e) => e.remove());
 }
 
-// ─── Contrast edges (injected into the page; each must be self-contained) ───
-
-function pageOverlaysHide() {
-    document.querySelectorAll('.a11ysc-ov, .a11ysc-bg, .a11ysc-tip, .a11ysc-fo, .a11ysc-fob').forEach((e) => {
-        e.dataset.a11yscVis = e.style.visibility;
-        e.style.visibility = 'hidden';
-    });
-    // Two frames so the hide has actually been painted before the screenshot is taken.
-    return new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))));
-}
-
-function pageOverlaysRestore() {
-    document.querySelectorAll('[data-a11ysc-vis]').forEach((e) => {
-        e.style.visibility = e.dataset.a11yscVis;
-        delete e.dataset.a11yscVis;
-    });
-}
+// ─── Contrast edges: the rest of the page-side code is in background.js ───
 
 function pageEdgesClear() {
     const shown = document.querySelectorAll('.a11ysc-ce');
     shown.forEach((e) => { if (e._a11yscOff) e._a11yscOff(); e.remove(); });
     return shown.length > 0;
-}
-
-// The map is a picture of the viewport at capture time, so it is pinned to the
-// viewport and taken down the moment the page underneath moves. A stale map that
-// no longer lines up with the page would be worse than none.
-function pageEdgesShow(url, min) {
-    const wrap = document.createElement('div');
-    wrap.className = 'a11ysc-ce';
-    wrap.setAttribute('role', 'dialog');
-    wrap.setAttribute('aria-label', 'Contrast edges view');
-    Object.assign(wrap.style, {
-        position: 'fixed', left: '0', top: '0', width: '100vw', height: '100vh',
-        background: '#000', zIndex: 2147483647, cursor: 'pointer', margin: '0', padding: '0',
-    });
-
-    const img = document.createElement('img');
-    img.src = url;
-    img.alt = 'Edges on this page with at least ' + min + ':1 contrast';
-    Object.assign(img.style, {
-        display: 'block', width: '100%', height: '100%', maxWidth: 'none', margin: '0',
-        objectFit: 'fill', imageRendering: 'auto', pointerEvents: 'none',
-    });
-    wrap.appendChild(img);
-
-    const chip = document.createElement('div');
-    chip.textContent = 'Contrast edges ≥ ' + min + ':1 · white passes, missing text does not · click, scroll or Esc to close';
-    Object.assign(chip.style, {
-        position: 'absolute', left: '12px', bottom: '12px', background: '#0d5c54', color: '#fff',
-        font: '600 12px/1.4 ui-sans-serif,system-ui,sans-serif', padding: '6px 10px', borderRadius: '6px',
-        boxShadow: '0 0 0 1px rgba(255,255,255,.6)', pointerEvents: 'none',
-    });
-    wrap.appendChild(chip);
-
-    const close = () => { off(); wrap.remove(); };
-    const onKey = (e) => { if (e.key === 'Escape') close(); };
-    const off = () => {
-        window.removeEventListener('scroll', close);
-        window.removeEventListener('resize', close);
-        window.removeEventListener('keydown', onKey, true);
-    };
-    wrap._a11yscOff = off;
-    wrap.addEventListener('click', close);
-    // Not capture: an auto-scrolling carousel inside the page must not close the view.
-    window.addEventListener('scroll', close);
-    window.addEventListener('resize', close);
-    window.addEventListener('keydown', onKey, true);
-
-    document.documentElement.appendChild(wrap);
-    // The popup compares this with the screenshot's width to learn the real capture
-    // scale. devicePixelRatio is not enough: the capture can come back at 1x anyway.
-    return window.innerWidth;
 }
 
 // ─── Focus-order visualiser (injected into the page; must be self-contained) ───

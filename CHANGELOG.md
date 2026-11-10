@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.1
+
+### Contrast edges follow the page as you scroll
+
+The contrast edges view used to close as soon as the page scrolled, because it is a picture of
+the screen and would no longer line up. Checking a long page meant reopening the popup for every
+screenful. Now the view hides while the page moves and redraws itself once scrolling stops, so you
+can work down a whole page in one go. Resizing the window does the same. Click or press Escape to
+close it.
+
+The re-captures run in a small background script, because the popup stops running as soon as you
+click the page. No new permissions: the access granted when you clicked the toolbar button lasts
+until the tab navigates. A capture that was still in progress when you scrolled again is thrown
+away rather than shown over the wrong part of the page.
+
 ## 0.4.0
 
 ### See contrast the way the page actually renders

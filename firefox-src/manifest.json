@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Accessibility Scanner — WCAG & Contrast",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Test any page for WCAG issues: color contrast, alt text, form labels, headings. Outlined where they are. No login, no email.",
   "action": {
     "default_popup": "popup.html",
@@ -32,5 +32,12 @@
         ]
       }
     }
+  },
+  "background": {
+    "scripts": [
+      "browser-shim.js",
+      "contrast-edges.js",
+      "background.js"
+    ]
   }
 }

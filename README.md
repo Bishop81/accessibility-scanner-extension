@@ -22,7 +22,7 @@ multi-page audits, saved history, and scheduled monitoring that catches regressi
   text sits on a CSS gradient, this measures the worst-case contrast and gives a real pass/fail.
 - **Contrast edges** — redraws the visible page in black and white from a screenshot, keeping only
   edges that meet 4.5:1, 3:1 or 7:1. Low-contrast text disappears, including text over photos,
-  gradients and overlays that code-based checks cannot measure.
+  gradients and overlays that code-based checks cannot measure. It redraws as you scroll.
 - **Export for an AI agent or developer** — copy a Markdown report or download JSON, each with the
   selector, the exact failure, and a fix link, ready to hand to a coding agent or drop into an issue.
 
